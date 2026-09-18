@@ -27,7 +27,7 @@ enum PacketType : uint16_t {
 
 // 상수 설정
 const int WORLD_MIN = 0;
-const int WORLD_MAX = 100;
+const int WORLD_MAX = 9;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기
@@ -252,15 +252,6 @@ int main() {
                                     if (nx < WORLD_MIN) nx = WORLD_MIN;
                                     if (ny > WORLD_MAX) ny = WORLD_MAX;
                                     if (ny < WORLD_MIN) ny = WORLD_MIN;
-
-                                    // 다른 유저와 충돌 체크 (이미 그 위치에 유저 존재하는지)
-                                    for (auto& [cfd, client] : clients) {
-                                        if (client.x == nx && client.y == ny) {
-                                            nx = c.x;
-                                            ny = c.y;
-                                            break;
-                                        }
-                                    }
 
                                     c.x = nx;
                                     c.y = ny;
