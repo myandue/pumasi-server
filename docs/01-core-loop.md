@@ -50,7 +50,7 @@
 
 
 ## 패킷
-- x, y는 월드 좌표 (0~5). 기존 PKT_TICK (1), PKT_SNAPSHOT (3)은 그대로.
+- x, y는 월드 좌표 (0~9). 기존 PKT_TICK (1), PKT_SNAPSHOT (3)은 그대로.
 - 클라 -> 서버
     - PKT_MOVE (2), payload 2byte: [dx: int8][dy: int8]
     - PKT_TILL (10), payload 2byte: [x: uint8][y: uint8]
