@@ -19,46 +19,12 @@
 #include <vector>
 #include <mutex>
 
-enum PacketType : uint16_t {
-    PKT_TICK = 1, // 서버 -> 클라: 지금 몇 tick 째인지
-    PKT_MOVE = 2, // 클라 -> 서버: client의 이동 수신
-    PKT_SNAPSHOT = 3, // 서버 -> 클라: 모든 플레이어의 좌표
-};
+#include "./protocol.h"
 
 // 상수 설정
 const int WORLD_MIN = 0;
 const int WORLD_MAX = 9;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
-
-// uint16을 빅엔디안 2바이트로 buf 끝에 붙이기
-void put_u16(std::string& buf, uint16_t v) {
-    buf.push_back((v >> 8) & 0xFF); // 상위 바이트 먼저
-    buf.push_back(v & 0xFF); // 하위 바이트
-}
-
-// uint32를 빅엔디안 4바이트로
-void put_u32(std::string& buf, uint32_t v) {
-    buf.push_back((v >> 24) & 0xFF);
-    buf.push_back((v >> 16) & 0xFF);
-    buf.push_back((v >> 8) & 0xFF);
-    buf.push_back(v & 0xFF);
-}
-
-// [lenth(2)][type(2)][payload] 완성된 패킷 바이트 만들기
-std::string make_packet(uint16_t type, const std::string& payload) {
-    std::string pkt;
-    put_u16(pkt, payload.size()); // length = payload 바이트 수 (헤더 제외)
-    put_u16(pkt, type);
-    pkt += payload; // 페이로드 이어붙이기 
-    return pkt;
-}
-
-
-// offset 위치 바이트와 offset+1 위치 바이트를 합쳐서 하나의 숫자로 만드는 작업
-// char 는 부호가 있는 타입이라 값이 오염될 수 있기 때문에 'unsigned char'로 캐스팅 후 연산 진행 
-uint16_t get_u16(std::string& buf, int offset) {
-    return (((unsigned char)buf[offset] << 8) | (unsigned char)buf[offset+1]);
-}
 
 struct Client {
     std::string send_buf;
@@ -77,6 +43,64 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
+
+void on_tick() {    
+    // 초기화는 이 줄에 도달했을 때 딱 한 번
+    static uint32_t tick = 0;
+    
+    // --- 모든 클라이언트의 위치 스냅샷 생성
+    std::string payload;
+    
+    // 1) 클라이언트 수
+    int client_cnt = clients.size();
+    put_u16(payload, client_cnt);
+    
+    // 2) clients 순회하면서 [id:4][x:4][y:4]로 받기
+    for (auto& [cfd, client] : clients) {
+        put_u32(payload, cfd);
+        put_u32(payload, client.x);
+        put_u32(payload, client.y);
+    }
+    
+    // 3) 완성 패킷: [length][type][payload]
+    std::string pkt = make_packet(PKT_SNAPSHOT, payload);
+    
+    // 4) 접속한 모두에게 전송
+    for (auto& [cfd, client] : clients) {
+        // write(int fd, const void* buf, size_t count);
+        // 두번째인자: 바이트 시작 주소, 세번째인자: 몇 바이트
+        ssize_t w =write(cfd, pkt.data(), pkt.size());
+        (void) w;
+        // pkt: string 객체, pkt.data(): 해당 문자열의 실제 바이트 배열의 첫 주소를 돌려줌
+        // pkt.size(): 그 바이트가 몇 개인지
+    }
+    
+    tick++;
+}
+
+void handle_packet(Client& c, uint16_t type, const std::string& payload) {
+    if (type == PKT_MOVE) {
+        if (payload.size() == 2) {
+            int8_t dx = (int8_t)payload[0];
+            int8_t dy = (int8_t)payload[1];
+
+            // 이상값 거부
+            if (dx < -MAX_STEP || dx > MAX_STEP || dy < -MAX_STEP || dy > MAX_STEP) return;
+
+            int nx = c.x + dx;
+            int ny = c.y + dy;
+            
+            // 세계보다 크거나 작을 경우 세계 사이즈 적용
+            if (nx > WORLD_MAX) nx = WORLD_MAX;
+            if (nx < WORLD_MIN) nx = WORLD_MIN;
+            if (ny > WORLD_MAX) ny = WORLD_MAX;
+            if (ny < WORLD_MIN) ny = WORLD_MIN;
+
+            c.x = nx;
+            c.y = ny;
+        }
+    }
+}
 
 int main() {
     signal(SIGPIPE, SIG_IGN); // SIGPIPE 무시 (프로세스 안 죽음)
@@ -139,38 +163,8 @@ int main() {
                 ssize_t n = read(timer_fd, &expirations, sizeof(expirations));
                 (void) n; // n으로 안받아도 되는데, read는 반환값을 받지 않고, 처리하지 않으면 경고를 발생시킴.
                 // read의 두번째 인자는 주소값이어야하는데, expirations의 경우 값 하나짜리(uint64_t)라서 주소형태('&')로 받는다.
-
-                // 초기화는 이 줄에 도달했을 때 딱 한 번
-                static uint32_t tick = 0;
-
-                // --- 모든 클라이언트의 위치 스냅샷 생성
-                std::string payload;
                 
-                // 1) 클라이언트 수
-                int client_cnt = clients.size();
-                put_u16(payload, client_cnt);
-
-                // 2) clients 순회하면서 [id:4][x:4][y:4]로 받기
-                for (auto& [cfd, client] : clients) {
-                    put_u32(payload, cfd);
-                    put_u32(payload, client.x);
-                    put_u32(payload, client.y);
-                }
-
-                // 3) 완성 패킷: [length][type][payload]
-                std::string pkt = make_packet(PKT_SNAPSHOT, payload);
-
-                // 4) 접속한 모두에게 전송
-                for (auto& [cfd, client] : clients) {
-                    // write(int fd, const void* buf, size_t count);
-                    // 두번째인자: 바이트 시작 주소, 세번째인자: 몇 바이트
-                    ssize_t w =write(cfd, pkt.data(), pkt.size());
-                    (void) w;
-                    // pkt: string 객체, pkt.data(): 해당 문자열의 실제 바이트 배열의 첫 주소를 돌려줌
-                    // pkt.size(): 그 바이트가 몇 개인지
-                }
-
-                tick++;
+                on_tick();
                 continue;
             }
 
@@ -236,27 +230,7 @@ int main() {
                             c.recv_buf.erase(0, 4 + length);
 
                             // 처리
-                            if (type == PKT_MOVE) {
-                                if (payload.size() == 2) {
-                                    int8_t dx = (int8_t)payload[0];
-                                    int8_t dy = (int8_t)payload[1];
-
-                                    // 이상값 거부
-                                    if (dx < -MAX_STEP || dx > MAX_STEP || dy < -MAX_STEP || dy > MAX_STEP) continue;
-
-                                    int nx = c.x + dx;
-                                    int ny = c.y + dy;
-
-                                    // 세계보다 크거나 작을 경우 세계 사이즈 적용
-                                    if (nx > WORLD_MAX) nx = WORLD_MAX;
-                                    if (nx < WORLD_MIN) nx = WORLD_MIN;
-                                    if (ny > WORLD_MAX) ny = WORLD_MAX;
-                                    if (ny < WORLD_MIN) ny = WORLD_MIN;
-
-                                    c.x = nx;
-                                    c.y = ny;
-                                }
-                            }
+                            handle_packet(c, type, payload);
                         }
                     }
                     

@@ -1,0 +1,46 @@
+#pragma once
+#include <string>
+#include <cstdint>
+
+enum PacketType : uint16_t {
+    PKT_TICK = 1, // 서버 -> 클라: 지금 몇 tick 째인지
+    PKT_MOVE = 2, // 클라 -> 서버: client의 이동 수신
+    PKT_SNAPSHOT = 3, // 서버 -> 클라: 모든 플레이어의 좌표
+};
+
+// uint16을 빅엔디안 2바이트로 buf 끝에 붙이기
+inline void put_u16(std::string& buf, uint16_t v) {
+    buf.push_back((v >> 8) & 0xFF); // 상위 바이트 먼저
+    buf.push_back(v & 0xFF); // 하위 바이트
+}
+
+// uint32를 빅엔디안 4바이트로
+inline void put_u32(std::string& buf, uint32_t v) {
+    buf.push_back((v >> 24) & 0xFF);
+    buf.push_back((v >> 16) & 0xFF);
+    buf.push_back((v >> 8) & 0xFF);
+    buf.push_back(v & 0xFF);
+}
+
+// [lenth(2)][type(2)][payload] 완성된 패킷 바이트 만들기
+inline std::string make_packet(uint16_t type, const std::string& payload) {
+    std::string pkt;
+    put_u16(pkt, payload.size()); // length = payload 바이트 수 (헤더 제외)
+    put_u16(pkt, type);
+    pkt += payload; // 페이로드 이어붙이기 
+    return pkt;
+}
+
+// offset 위치 바이트와 offset+1 위치 바이트를 합쳐서 하나의 숫자로 만드는 작업
+// char 는 부호가 있는 타입이라 값이 오염될 수 있기 때문에 'unsigned char'로 캐스팅 후 연산 진행 
+inline uint16_t get_u16(std::string& buf, int offset) {
+    return (((unsigned char)buf[offset] << 8) | (unsigned char)buf[offset+1]);
+}
+
+inline uint32_t get_u32(std::string& buf, int offset) {
+    uint32_t payload = ((unsigned char)buf[offset] << 24);
+    payload |= ((unsigned char)buf[offset+1] << 16);
+    payload |= ((unsigned char)buf[offset+2] << 8);
+    payload |= (unsigned char)buf[offset+3];
+    return payload;
+}

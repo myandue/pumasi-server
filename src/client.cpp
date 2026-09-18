@@ -11,39 +11,7 @@
 
 #include <termios.h>
 
-// 서버와 공유하는 계약
-enum PacketType : uint16_t {
-    PKT_TICK = 1,
-    PKT_MOVE = 2,
-    PKT_SNAPSHOT = 3,
-};
-
-void put_u16(std::string& buf, uint16_t v) {
-    buf.push_back((v >> 8) & 0xFF);
-    buf.push_back(v & 0xFF);
-}
-
-// 빅엔디안 2바이트 -> 숫자
-uint16_t get_u16(std::string& buf, int offset) {
-    return (((unsigned char)buf[offset] << 8) | (unsigned char)buf[offset+1]);
-}
-
-uint32_t get_u32(std::string& buf, int offset) {
-    uint32_t payload = ((unsigned char)buf[offset] << 24);
-    payload |= ((unsigned char)buf[offset+1] << 16);
-    payload |= ((unsigned char)buf[offset+2] << 8);
-    payload |= (unsigned char)buf[offset+3];
-    return payload;
-}
-
-// [length(2)][type(2)][payload]
-std::string make_packet(uint16_t type, const std::string& payload) {
-    std::string pkt;
-    put_u16(pkt, payload.size());
-    put_u16(pkt, type);
-    pkt += payload;
-    return pkt;
-}
+#include "./protocol.h"
 
 struct Client {
     int x;
