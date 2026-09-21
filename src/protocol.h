@@ -6,6 +6,14 @@ enum PacketType : uint16_t {
     PKT_TICK = 1, // 서버 -> 클라: 지금 몇 tick 째인지
     PKT_MOVE = 2, // 클라 -> 서버: client의 이동 수신
     PKT_SNAPSHOT = 3, // 서버 -> 클라: 모든 플레이어의 좌표
+
+    PKT_TILL = 10, // 클라 -> 서버: [x:1][y:1]
+    PKT_PLANT = 11, // 클라 -> 서버: [x:1][y:1][crop:1]
+    PKT_WATER = 12, // 클라 -> 서버: [x:1][y:1]
+    PKT_HARVEST = 13, // 클라 -> 서버: [x:1][y:1]
+    
+    PKT_TILE_UPDATE = 20, // 서버 -> 클라: [x:1][y:1][state:1][crop:1][stage:1][watered_at:8]
+    PKT_FARM_SNAPSHOT = 21, // 서버 -> 클라 [server_now:8] + 36칸*[state:1][crop:1][stage:1][watered_at:8]
 };
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기
@@ -16,6 +24,18 @@ inline void put_u16(std::string& buf, uint16_t v) {
 
 // uint32를 빅엔디안 4바이트로
 inline void put_u32(std::string& buf, uint32_t v) {
+    buf.push_back((v >> 24) & 0xFF);
+    buf.push_back((v >> 16) & 0xFF);
+    buf.push_back((v >> 8) & 0xFF);
+    buf.push_back(v & 0xFF);
+}
+
+// uint64를 빅엔디안 8바이트로
+inline void put_u64(std::string& buf, uint64_t v) {
+    buf.push_back((v >> 56) & 0xFF);
+    buf.push_back((v >> 48) & 0xFF);
+    buf.push_back((v >> 40) & 0xFF);
+    buf.push_back((v >> 32) & 0xFF);
     buf.push_back((v >> 24) & 0xFF);
     buf.push_back((v >> 16) & 0xFF);
     buf.push_back((v >> 8) & 0xFF);
@@ -42,5 +62,19 @@ inline uint32_t get_u32(std::string& buf, int offset) {
     payload |= ((unsigned char)buf[offset+1] << 16);
     payload |= ((unsigned char)buf[offset+2] << 8);
     payload |= (unsigned char)buf[offset+3];
+    return payload;
+}
+
+inline uint64_t get_u64(std::string& buf, int offset) {
+    // unsigned char는 계산에 들어가는 순간 32비트 int로 바뀐다.
+    // 32비트 값을 32칸 이상 밀면 결과가 망가지기 때문에 64비트로 먼저 바꿔줘야한다.
+    uint64_t payload = ((uint64_t)(unsigned char)buf[offset] << 56);
+    payload |= ((uint64_t)(unsigned char)buf[offset+1] << 48);
+    payload |= ((uint64_t)(unsigned char)buf[offset+2] << 40);
+    payload |= ((uint64_t)(unsigned char)buf[offset+3] << 32);
+    payload |= ((uint64_t)(unsigned char)buf[offset+4] << 24);
+    payload |= ((uint64_t)(unsigned char)buf[offset+5] << 16);
+    payload |= ((uint64_t)(unsigned char)buf[offset+6] << 8);
+    payload |= (uint64_t)(unsigned char)buf[offset+7];
     return payload;
 }

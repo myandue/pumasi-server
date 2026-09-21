@@ -4,3 +4,4 @@ game
 client
 game_server
 farm_test
+protocol_test
