@@ -20,6 +20,7 @@
 #include <mutex>
 
 #include "./protocol.h"
+#include "./farm.h"
 
 // 상수 설정
 const int WORLD_MIN = 0;
@@ -35,6 +36,7 @@ struct Client {
     int y;
 };
 std::unordered_map<int, Client> clients;
+Tile farm[FIELD_SIZE][FIELD_SIZE]; // farm[y][x]
 
 int epfd = epoll_create1(0); // 장부 개설
 
@@ -43,6 +45,33 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
+
+// 접속 직후 1회: 서버 현재 시각 + 밭 전체 스냅샷
+void send_farm_snapshot(int fd) {
+    std::string payload;
+
+    // 1) server_now 8바이트
+    uint64_t now = now_ms();
+    put_u64(payload, now);
+
+    // 2) farm. 보내기 직전에 refresh.
+    for (int i = 0 ; i < FIELD_SIZE ; i++) {
+        for (int j = 0 ; j < FIELD_SIZE ; j++) {
+            refresh(farm[i][j], now);
+            payload.push_back(farm[i][j].state);
+            payload.push_back(farm[i][j].crop);
+            payload.push_back(farm[i][j].stage);
+            put_u64(payload, farm[i][j].watered_at);
+        }
+    }
+
+    // 3) make_packet
+    std::string pkt = make_packet(PKT_FARM_SNAPSHOT, payload);
+
+    // 4) write
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
 
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
@@ -181,6 +210,7 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
+                    send_farm_snapshot(client_fd);
 
                     continue;
                 } else {
