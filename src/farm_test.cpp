@@ -35,5 +35,84 @@ int main() {
     assert(t.watered_at == 0);
     assert(t.state == RIPE);
 
+    // 동작 테스트 / 땅 초기화
+    t = Tile{};
+
+    // 맨 땅
+    assert(t.state == BARE);
+
+    assert(plant(t, TURNIP) == false);
+    assert(water(t, now_ms()) == false);
+    assert(harvest(t) == false);
+    assert(till(t) == true);
+
+    assert(t.stage == 0);
+    assert(t.watered_at == 0);
+    assert(t.state == TILLED);
+
+    // 갈린 땅
+    assert(t.state == TILLED);
+
+    assert(till(t) == false);
+    assert(water(t, now_ms()) == false);
+    assert(harvest(t)== false);
+    assert(plant(t, TURNIP) == true);
+
+    assert(t.stage == 0);
+    assert(t.watered_at == 0);
+    assert(t.state == GROWING);
+
+    // 심겨진 땅
+    assert(t.state == GROWING);
+
+    watered_at = now_ms();
+
+    assert(till(t) == false);
+    assert(plant(t, TURNIP) == false);
+    assert(harvest(t)== false);
+    assert(water(t, watered_at) == true);
+
+    assert(t.stage == 0);
+    assert(t.watered_at == watered_at);
+    assert(t.state == GROWING);
+
+    // 물 준 땅
+    assert(till(t) == false);
+    assert(plant(t, TURNIP) == false);
+    assert(water(t, watered_at) == false);
+    assert(harvest(t)== false);
+
+    // 한 단계 자람
+    refresh(t, watered_at + 30000);
+
+    assert(t.stage == 1);
+    assert(t.watered_at == 0);
+    assert(t.state == GROWING);
+
+    watered_at = now_ms();
+
+    assert(till(t) == false);
+    assert(plant(t, TURNIP) == false);
+    assert(harvest(t)== false);
+    assert(water(t, watered_at) == true);
+
+    // 다 자람
+    refresh(t, watered_at + 30000);
+
+    assert(t.stage == 2);
+    assert(t.watered_at == 0);
+    assert(t.state == RIPE);
+
+    assert(till(t) == false);
+    assert(plant(t, TURNIP) == false);
+    assert(water(t, now_ms()) == false);
+    assert(harvest(t)== true);
+
+    // 수확 후
+    assert(t.crop == 0);
+    assert(t.stage == 0);
+    assert(t.watered_at == 0);
+    assert(t.state == BARE);
+
     return 0;
 }
