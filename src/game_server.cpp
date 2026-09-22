@@ -8,6 +8,7 @@
 #include <sys/eventfd.h> // eventfd
 #include <sys/timerfd.h> //timerfd
 #include <cstdint> // uint64_t
+#include <cstdlib>
 
 #include <fcntl.h> // fcntl, O_NONBLOCK
 #include <cerrno> // errno, EAGAIN
@@ -73,6 +74,97 @@ void send_farm_snapshot(int fd) {
     (void) w;
 }
 
+// 땅 업데이트 시 전송 / 칸 하나의 현재 값을 fd에게. x, y는 월드 좌표 
+void send_tile_update(int fd, uint8_t x, uint8_t y) {
+    std::string payload;
+    Tile tile = farm[y-FIELD_Y0][x-FIELD_X0];
+
+    payload.push_back(x);
+    payload.push_back(y);
+    payload.push_back(tile.state);
+    payload.push_back(tile.crop);
+    payload.push_back(tile.stage);
+    put_u64(payload, tile.watered_at);
+
+    std::string pkt = make_packet(PKT_TILE_UPDATE, payload);
+
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
+
+// move
+void handle_move(Client& c, const std::string& payload) {
+    if (payload.size() != 2) return;
+
+    int8_t dx = (int8_t)payload[0];
+    int8_t dy = (int8_t)payload[1];
+
+    // 이상값 거부
+    if (dx < -MAX_STEP || dx > MAX_STEP || dy < -MAX_STEP || dy > MAX_STEP) return;
+
+    int nx = c.x + dx;
+    int ny = c.y + dy;
+    
+    // 세계보다 크거나 작을 경우 세계 사이즈 적용
+    if (nx > WORLD_MAX) nx = WORLD_MAX;
+    if (nx < WORLD_MIN) nx = WORLD_MIN;
+    if (ny > WORLD_MAX) ny = WORLD_MAX;
+    if (ny < WORLD_MIN) ny = WORLD_MIN;
+
+    c.x = nx;
+    c.y = ny;
+}
+
+// 갈기/심기/물/수확 공통 처리. 01 문서 "서버 검증" 순서 그대로
+void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& payload) {
+    // 1. 크기가 맞지 않으면 무시 (심기 3, 나머지 2)
+    size_t need = (type == PKT_PLANT) ? 3 : 2;
+    if (payload.size() != need) return;
+
+    uint8_t x = (uint8_t)payload[0];
+    uint8_t y = (uint8_t)payload[1];
+    uint8_t crop = CROP_NONE;
+    if (type == PKT_PLANT) {
+        crop = payload[2];
+
+        // crop이 1~3을 벗어나면 무시
+        if (crop < 1 || crop > 3) return;
+    }
+
+
+    // 2. 밭 영역 밖이면 무시
+    if (x < FIELD_X0 || x >= FIELD_X0 + FIELD_SIZE ||
+    y < FIELD_Y0 || y >= FIELD_Y0 + FIELD_SIZE) return;
+
+    // 3. 내 위치에서 가로/세로 각각 1칸 이내가 아니면 거부
+    // 참고로 1, 2의 경우 정상 클라 코드라면 만들 수 없는 값이기 때문에 바로 return을 주며 무시를,
+    // 3, 5의 경우 클라가 요청할 수 있는 값이기 때문에 `send_tile_update`로 응답을 주며 거부한다.
+    if (abs(c.x - x) > 1 || abs(c.y - y) > 1) {
+        send_tile_update(fd, x, y); // 현재 '틀렸다'라는 응답을 받지는 않는다. 그저 응답.
+        return;
+    }
+
+    // 4. 갱신
+    Tile& t = farm[y-FIELD_Y0][x-FIELD_X0];
+    uint64_t now = now_ms();
+    refresh(t, now);
+
+    // 5~6. 행동. 필요한 상태가 아니면 함수가 false를 돌려주고 칸은 그대로.
+    switch (type) {
+        case PKT_TILL:
+            till(t); break;
+        case PKT_PLANT:
+            plant(t, crop); break;
+        case PKT_WATER:
+            water(t, now); break;
+        case PKT_HARVEST:
+            harvest(t); break;
+    }
+
+    // 요청자에게 그 칸의 현재 값 보내기
+    send_tile_update(fd, x, y);
+}
+
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
@@ -107,27 +199,14 @@ void on_tick() {
     tick++;
 }
 
-void handle_packet(Client& c, uint16_t type, const std::string& payload) {
-    if (type == PKT_MOVE) {
-        if (payload.size() == 2) {
-            int8_t dx = (int8_t)payload[0];
-            int8_t dy = (int8_t)payload[1];
-
-            // 이상값 거부
-            if (dx < -MAX_STEP || dx > MAX_STEP || dy < -MAX_STEP || dy > MAX_STEP) return;
-
-            int nx = c.x + dx;
-            int ny = c.y + dy;
-            
-            // 세계보다 크거나 작을 경우 세계 사이즈 적용
-            if (nx > WORLD_MAX) nx = WORLD_MAX;
-            if (nx < WORLD_MIN) nx = WORLD_MIN;
-            if (ny > WORLD_MAX) ny = WORLD_MAX;
-            if (ny < WORLD_MIN) ny = WORLD_MIN;
-
-            c.x = nx;
-            c.y = ny;
-        }
+void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload) {
+    switch (type) {
+        case PKT_MOVE:
+            handle_move(c, payload); break;
+        case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
+            handle_farm_action(fd, c, type, payload); break;
+        default:
+            break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }
 }
 
@@ -260,7 +339,7 @@ int main() {
                             c.recv_buf.erase(0, 4 + length);
 
                             // 처리
-                            handle_packet(c, type, payload);
+                            handle_packet(fd, c, type, payload);
                         }
                     }
                     
