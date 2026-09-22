@@ -58,6 +58,8 @@
     - PKT_WATER (12), payload 2byte: [x: uint8][y: uint8]
     - PKT_HARVEST (13), payload 2byte: [x: uint8][y: uint8]
 - 서버 -> 클라
+    - PKT_WELCOME (4), payload 4byte: [id: uint32]
+        - 접속 직후 1회. 클라가 여러 플레이어 중 본인을 구분하기 위해.
     - PKT_TILE_UPDATE (20), payload 13byte: [x: uint8][y: uint8][state: uint8][crop: uint8][stage: uint8][watered_at: uint64]
         - 칸 하나의 현재 값. 칸이 바뀌었을 때, 그리고 요청을 거부했을 때 보낸다.
     - PKT_FARM_SNAPSHOT (21), payload 404byte: [server_now: uint64] + 36칸 * [state: uint8][crop: uint8][stage: uint8][watered_at: uint64]

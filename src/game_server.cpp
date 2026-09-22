@@ -23,9 +23,6 @@
 #include "./protocol.h"
 #include "./farm.h"
 
-// 상수 설정
-const int WORLD_MIN = 0;
-const int WORLD_MAX = 9;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
@@ -46,6 +43,15 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
+
+// 클라한테 해당 클라의 id(fd) 전송
+void send_welcome(int fd) {
+    std::string payload;
+    put_u32(payload, fd);
+    std::string pkt = make_packet(PKT_WELCOME, payload);
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
 
 // 접속 직후 1회: 서버 현재 시각 + 밭 전체 스냅샷
 void send_farm_snapshot(int fd) {
@@ -179,6 +185,7 @@ void on_tick() {
     // 2) clients 순회하면서 [id:4][x:4][y:4]로 받기
     for (auto& [cfd, client] : clients) {
         put_u32(payload, cfd);
+        // TODO 좌표 크기 통일
         put_u32(payload, client.x);
         put_u32(payload, client.y);
     }
@@ -289,6 +296,7 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
+                    send_welcome(client_fd);
                     send_farm_snapshot(client_fd);
 
                     continue;

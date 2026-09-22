@@ -6,6 +6,7 @@ enum PacketType : uint16_t {
     PKT_TICK = 1, // 서버 -> 클라: 지금 몇 tick 째인지
     PKT_MOVE = 2, // 클라 -> 서버: client의 이동 수신
     PKT_SNAPSHOT = 3, // 서버 -> 클라: 모든 플레이어의 좌표
+    PKT_WELCOME = 4, // 서버 -> 클라: 해당 클라의 fd 알려주기
 
     PKT_TILL = 10, // 클라 -> 서버: [x:1][y:1]
     PKT_PLANT = 11, // 클라 -> 서버: [x:1][y:1][crop:1]

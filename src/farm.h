@@ -2,6 +2,9 @@
 #include <cstdint>
 #include <chrono>
 
+const int WORLD_MIN = 0;
+const int WORLD_MAX = 9;
+
 // 밭 위치 (월드 좌표 기준)
 const int FIELD_X0 = 2;
 const int FIELD_Y0 = 2;
