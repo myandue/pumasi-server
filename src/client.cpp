@@ -8,10 +8,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unordered_map>
+#include <cctype> // console에서 작물 물 여부 표시(대문자)를 위함 
 
 #include <termios.h>
 
 #include "./protocol.h"
+#include "./farm.h"
 
 struct Client {
     int x;
@@ -19,7 +21,87 @@ struct Client {
 };
 std::unordered_map<int, Client> clients;
 
+Tile farm[FIELD_SIZE][FIELD_SIZE];
+int my_id = -1;
+int64_t server_offset = 0; // 서버와의 시간차
+int face_dx = 0; // 바라보는 방향
+int face_dy = 1; // 초기값 (0, 1)은 아래 방향을 바라보는 중
+
 int epfd = epoll_create1(0);
+
+// 밭과 플레이어를 10*10 격자로 그린다
+void draw() {
+    uint64_t server_now = (uint64_t)((int64_t)now_ms() + server_offset);
+
+    // 화면 지우고 커서 맨 위로
+    printf("\033[2J\033[H"); // '\033': ESC, '[2J': 화면 클리어, '[H': 커서를 좌상단으로
+
+    for (int y = WORLD_MIN ; y <= WORLD_MAX ; y++) {
+        for (int x = WORLD_MIN ; x <= WORLD_MAX ; x++) {
+            char ch = '.'; // 밭 밖 바닥
+
+            // 밭 체크
+            bool in_field = (x >= FIELD_X0 && x < FIELD_X0 + FIELD_SIZE &&
+                                y >= FIELD_Y0 && y < FIELD_Y0 + FIELD_SIZE);
+
+            if (in_field) {
+                Tile t = farm[y-FIELD_Y0][x-FIELD_X0]; // 복사본
+                refresh(t, server_now); // 표시용 단계 계산 
+                const char* c = "?tcp"; // crop 1~3 -> t/c/p
+                if (t.state == BARE) ch = '_';
+                else if (t.state == TILLED) ch = '=';
+                else if (t.state == GROWING) ch = t.watered_at ? toupper(c[t.crop]) : c[t.crop]; // toupper: 젖은 작물 표기용 대문자 변환
+                else  /* RIPE */ ch = '*';
+            }
+
+            for (auto& [id, p]: clients) { // 플레이어가 있으면 덮어씀. '나'일 경우에는 '@' / 다른 사람은 'P'
+                if (p.x == x && p.y == y) ch = (id == my_id) ? '@' : 'P';
+            }
+            putchar(ch); putchar(' ');
+        }
+        // 줄(y) 바꿈
+        putchar('\n');
+    }
+
+    printf("\n_: 맨땅 | =: 갈린땅 | t/c/p: 작물(마름) | T/C/P: 작물(젖음) | *: 작물 다 자람 | @: 나 | P: 다른 플레이어\n");
+    printf("wasd: 이동 | t: 갈기 | 1/2/3: 심기 | e: 물 | r: 수확 | q: 종료\n");
+    
+    // 방향 적용 내 위치 출력 
+    if (clients.count(my_id)) {
+        printf("대상 칸: (%d, %d)\n", clients[my_id].x + face_dx, clients[my_id].y + face_dy);
+    }
+
+    // 현재 버퍼 비우기
+    fflush(stdout);
+}
+
+// 앞 칸을 대상으로 농사 패킷 전송
+void send_action(int sock, char key) {
+    uint16_t type;
+    uint8_t crop = 0;
+
+    if (key == 't') type = PKT_TILL;
+    else if (key == '1') { type = PKT_PLANT; crop = 1; }
+    else if (key == '2') { type = PKT_PLANT; crop = 2; }
+    else if (key == '3') { type = PKT_PLANT; crop = 3; }
+    else if (key == 'e') type = PKT_WATER;
+    else if (key == 'r') type = PKT_HARVEST;
+    else return;
+
+    if (!clients.count(my_id)) return;
+    int tx = clients[my_id].x + face_dx;
+    int ty = clients[my_id].y + face_dy;
+
+    std::string payload;
+    payload.push_back((uint8_t)tx);
+    payload.push_back((uint8_t)ty);
+    if (type == PKT_PLANT) payload.push_back((uint8_t)crop);
+
+    std::string pkt = make_packet(type, payload);
+
+    ssize_t w = write(sock, pkt.data(), pkt.size());
+    (void) w;
+}
 
 int main() {
     signal(SIGPIPE, SIG_IGN);
@@ -98,8 +180,9 @@ int main() {
                     std::string payload = recv_buf.substr(4, length);
                     recv_buf.erase(0, 4 + length);
 
-                    // 처리 - 모든 유저의 위치값 받기
+                    // 처리
                     if (type == PKT_SNAPSHOT) {
+                        // 모든 유저의 위치값 받기
                         clients.clear();
                         int client_cnt = get_u16(payload, 0);
 
@@ -111,19 +194,34 @@ int main() {
 
                             clients[id] = Client{.x = x, .y = y};
                         }
+                    } else if (type == PKT_WELCOME) {
+                        // 서버에서의 내 id 값 받기
+                        my_id = get_u32(payload, 0);
+                    } else if (type == PKT_FARM_SNAPSHOT) {
+                        server_offset = (int64_t)get_u64(payload, 0) - (int64_t)now_ms(); // 부호가 필요한 계산에서는 int로 캐스팅을 해준다
+
+                        for (int i = 0 ; i < FIELD_SIZE ; i++) {
+                            for (int j = 0 ; j < FIELD_SIZE ; j++) {
+                                int offset = 8 + (i*FIELD_SIZE + j)*11;
+
+                                farm[i][j].state = payload[offset];
+                                farm[i][j].crop = payload[offset+1];
+                                farm[i][j].stage = payload[offset+2];
+                                farm[i][j].watered_at = get_u64(payload, offset+3);
+                            }
+                        }
+                    } else if (type == PKT_TILE_UPDATE) {
+                        int x = payload[0];
+                        int y = payload[1];
+
+                        farm[y-FIELD_Y0][x-FIELD_X0].state = payload[2];
+                        farm[y-FIELD_Y0][x-FIELD_X0].crop = payload[3];
+                        farm[y-FIELD_Y0][x-FIELD_X0].stage = payload[4];
+                        farm[y-FIELD_Y0][x-FIELD_X0].watered_at = get_u64(payload, 5);
                     }
 
-                    // 출력 - 모든 유저의 위치값 그리기
-                    // 화면 지우고 커서 맨 위로
-                    printf("\033[2J\033[H"); // '\033': ESC, '[2J': 화면 클리어, '[H': 커서를 좌상단으로
-
-                    // 실제 위치 출력
-                    for (auto& [id, client] : clients) {
-                        printf("id %d: (%d, %d)\n", id, client.x, client.y);
-                    }
-
-                    // 현재 버퍼 비우기
-                    fflush(stdout);
+                    // 출력
+                    draw();
                 }
                 
                 continue;
@@ -135,24 +233,31 @@ int main() {
 
                 if (cnt <= 0) { closed = true; break; } // 0: 입력 닫힘, <0: 에러
                 
-                int dx = 0;
-                int dy = 0;
-                switch (key) {
-                    case 'w': dy = -1; break;
-                    case 's': dy = +1; break;
-                    case 'a': dx = -1; break;
-                    case 'd': dx = +1; break;
-                    case 'q': closed = true; break; // 종료 키
+                if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
+                    int dx = 0;
+                    int dy = 0;
+                    if (key == 'w') dy = -1;
+                    if (key == 's') dy = +1;
+                    if (key == 'a') dx = -1;
+                    if (key == 'd') dx = +1;
+                    
+                    // 방향 기억
+                    face_dx = dx;
+                    face_dy = dy;
+
+                    std::string payload;
+                    payload.push_back((int8_t)dx); // 1바이트인 int8_t로 캐스팅해서 넣기
+                    payload.push_back((int8_t)dy);
+                    
+                    std::string pkt = make_packet(PKT_MOVE, payload);
+
+                    ssize_t w = write(sock, pkt.data(), pkt.size());
+                    (void) w;
+                } else if (key == 'q') { // 종료 키
+                    closed = true;
+                } else {
+                    send_action(sock, key);
                 }
-
-                std::string payload;
-                payload.push_back((int8_t)dx); // 1바이트인 int8_t로 캐스팅해서 넣기
-                payload.push_back((int8_t)dy);
-
-                std::string pkt = make_packet(PKT_MOVE, payload);
-
-                ssize_t w = write(sock, pkt.data(), pkt.size());
-                (void) w;
 
                 continue;
             }
