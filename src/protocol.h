@@ -15,6 +15,11 @@ enum PacketType : uint16_t {
     
     PKT_TILE_UPDATE = 20, // 서버 -> 클라: [x:1][y:1][state:1][crop:1][stage:1][watered_at:8]
     PKT_FARM_SNAPSHOT = 21, // 서버 -> 클라 [server_now:8] + 36칸*[state:1][crop:1][stage:1][watered_at:8]
+
+    PKT_BUY = 30, // 클라 -> 서버: [crop:1][count:1]
+    PKT_SELL = 31, // 클라 -> 서버: [crop:1][count:1]
+
+    PKT_WALLET = 40, // 서버 -> 클라: [coin:4] + crop 1~3 각각 [seeds:1][held:1]
 };
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기

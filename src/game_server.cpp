@@ -32,6 +32,11 @@ struct Client {
     //위치
     int x;
     int y;
+
+    // 인벤토리·코인
+    int coin = 100;
+    int seeds[CROP_COUNT] = {0};
+    int held[CROP_COUNT] = {0};
 };
 std::unordered_map<int, Client> clients;
 Tile farm[FIELD_SIZE][FIELD_SIZE]; // farm[y][x]
@@ -98,6 +103,22 @@ void send_tile_update(int fd, uint8_t x, uint8_t y) {
     (void) w;
 }
 
+void send_wallet(int fd, Client& c) {
+    std::string payload;
+    
+    put_u32(payload, c.coin);
+    
+    for (int i = 1 ; i < CROP_COUNT ; i++) {
+        payload.push_back(c.seeds[i]);
+        payload.push_back(c.held[i]);
+    }
+
+    std::string pkt = make_packet(PKT_WALLET, payload);
+
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
+
 // move
 void handle_move(Client& c, const std::string& payload) {
     if (payload.size() != 2) return;
@@ -137,7 +158,6 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
         if (crop < 1 || crop > 3) return;
     }
 
-
     // 2. 밭 영역 밖이면 무시
     if (x < FIELD_X0 || x >= FIELD_X0 + FIELD_SIZE ||
     y < FIELD_Y0 || y >= FIELD_Y0 + FIELD_SIZE) return;
@@ -155,20 +175,69 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     uint64_t now = now_ms();
     refresh(t, now);
 
+    // 씨앗을 갖고있지 않다면 거부
+    if (type == PKT_PLANT && c.seeds[crop] < 1) {
+        send_tile_update(fd, x, y);
+        return;
+    }
+
     // 5~6. 행동. 필요한 상태가 아니면 함수가 false를 돌려주고 칸은 그대로.
     switch (type) {
         case PKT_TILL:
             till(t); break;
-        case PKT_PLANT:
-            plant(t, crop); break;
+        case PKT_PLANT: {
+            if (plant(t, crop)) c.seeds[crop] -= 1;
+            send_wallet(fd, c);
+            break;
+        }
         case PKT_WATER:
             water(t, now); break;
-        case PKT_HARVEST:
-            harvest(t); break;
+        case PKT_HARVEST: {
+            uint8_t crop = t.crop; // harvest로 비우기 전에 crop 읽기.
+            if (harvest(t)) c.held[crop] += 1;
+            send_wallet(fd, c);
+            break;
+        }
     }
 
     // 요청자에게 그 칸의 현재 값 보내기
     send_tile_update(fd, x, y);
+}
+
+void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) {
+    // 1. 크기가 맞지 않으면 무시
+    if (payload.size() != 2) return;
+
+    uint8_t crop = (uint8_t)payload[0];
+    uint8_t count = (uint8_t)payload[1];
+
+    // 2. crop이 1~3을 벗어나면 무시
+    if (crop < 1 || crop > 3) return;
+
+    if (type == PKT_BUY) {
+        // 3. 코인 < 씨앗값*count 면 거부
+        if (c.coin < CROPS[crop].seed_price * count) {
+            send_wallet(fd, c);
+            return;
+        }
+
+        // 4. 처리
+        c.coin -= CROPS[crop].seed_price * count;
+        c.seeds[crop] += count;
+        send_wallet(fd, c);
+
+    } else if (type == PKT_SELL) {
+        // 3. held[crop] < count 면 거부
+        if (c.held[crop] < count) {
+            send_wallet(fd, c);
+            return;
+        }
+
+        // 4. 처리
+        c.held[crop] -= count;
+        c.coin += CROPS[crop].sell_price * count;
+        send_wallet(fd, c);
+    }
 }
 
 void on_tick() {    
@@ -212,6 +281,8 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
             handle_move(c, payload); break;
         case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
             handle_farm_action(fd, c, type, payload); break;
+        case PKT_BUY: case PKT_SELL:
+            handle_wallet(fd, c, type, payload); break;
         default:
             break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }
@@ -298,6 +369,7 @@ int main() {
                     clients[client_fd] = Client{};
                     send_welcome(client_fd);
                     send_farm_snapshot(client_fd);
+                    send_wallet(client_fd, clients[client_fd]);
 
                     continue;
                 } else {

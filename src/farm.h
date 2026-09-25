@@ -15,12 +15,12 @@ enum TileState: uint8_t { BARE = 0, TILLED = 1, GROWING = 2, RIPE = 3 };
 enum CropType : uint8_t { CROP_NONE = 0, TURNIP = 1, CARROT = 2, PUMPKIN = 3 };
 const int CROP_COUNT = 4; // NONE 포함
 
-struct CropDef { uint8_t stages; uint64_t stage_ms; };
+struct CropDef { uint8_t stages; uint64_t stage_ms; int seed_price; int sell_price; };
 const CropDef CROPS[CROP_COUNT] = {
-    {0, 0}, // CROP_NONE 자리 채움
-    {2, 30 * 1000}, // TURNIP 순무
-    {3, 60 * 1000}, // CARROT 당근
-    {4, 150 * 1000}, // PUMPKIN 호박
+    {0, 0, 0, 0}, // CROP_NONE 자리 채움
+    {2, 30 * 1000, 10, 20}, // TURNIP 순무
+    {3, 60 * 1000, 30, 75}, // CARROT 당근
+    {4, 150 * 1000, 100, 300}, // PUMPKIN 호박
 };
 
 struct Tile {

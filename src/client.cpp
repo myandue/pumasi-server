@@ -23,11 +23,37 @@ std::unordered_map<int, Client> clients;
 
 Tile farm[FIELD_SIZE][FIELD_SIZE];
 int my_id = -1;
+
 int64_t server_offset = 0; // 서버와의 시간차
+
 int face_dx = 0; // 바라보는 방향
 int face_dy = 1; // 초기값 (0, 1)은 아래 방향을 바라보는 중
 
+int my_coin = 0;
+int my_seeds[CROP_COUNT] = {0};
+int my_held[CROP_COUNT] = {0};
+
+// 상점 창
+bool shop_open = false;
+
 int epfd = epoll_create1(0);
+
+// 상점 창
+void draw_shop() {
+    printf("=== 상점 ===\n코인: %dG\n\n", my_coin);
+    printf(" %-8s 씨앗값   판매가   보유(씨앗/수확물)\n", "작물");
+    
+    const char* name[] = {"?", "순무", "당근", "호박"};
+    for (int c = 1 ; c < CROP_COUNT ; c++) {
+        printf(" %-8s %4dG    %4dG          %2d / %2d\n", // 숫자: 칸수, -: 왼쪽 정렬 / 기본은 오른쪽 정렬
+            name[c], CROPS[c].seed_price, CROPS[c].sell_price, my_seeds[c], my_held[c]
+        );
+    }
+
+    printf("\n사기: 1 순무 / 2 당근 / 3 호박\n");
+    printf("팔기: (shift) 1 순무 / 2 당근 / 3 호박\n");
+    printf("닫기: b 또는 q\n");
+} 
 
 // 밭과 플레이어를 10*10 격자로 그린다
 void draw() {
@@ -36,40 +62,47 @@ void draw() {
     // 화면 지우고 커서 맨 위로
     printf("\033[2J\033[H"); // '\033': ESC, '[2J': 화면 클리어, '[H': 커서를 좌상단으로
 
-    for (int y = WORLD_MIN ; y <= WORLD_MAX ; y++) {
-        for (int x = WORLD_MIN ; x <= WORLD_MAX ; x++) {
-            char ch = '.'; // 밭 밖 바닥
+    if (shop_open) { // 상점 창
+        draw_shop();
+    } else {
+        for (int y = WORLD_MIN ; y <= WORLD_MAX ; y++) {
+            for (int x = WORLD_MIN ; x <= WORLD_MAX ; x++) {
+                char ch = '.'; // 밭 밖 바닥
 
-            // 밭 체크
-            bool in_field = (x >= FIELD_X0 && x < FIELD_X0 + FIELD_SIZE &&
-                                y >= FIELD_Y0 && y < FIELD_Y0 + FIELD_SIZE);
+                // 밭 체크
+                bool in_field = (x >= FIELD_X0 && x < FIELD_X0 + FIELD_SIZE &&
+                                    y >= FIELD_Y0 && y < FIELD_Y0 + FIELD_SIZE);
 
-            if (in_field) {
-                Tile t = farm[y-FIELD_Y0][x-FIELD_X0]; // 복사본
-                refresh(t, server_now); // 표시용 단계 계산 
-                const char* c = "?tcp"; // crop 1~3 -> t/c/p
-                if (t.state == BARE) ch = '_';
-                else if (t.state == TILLED) ch = '=';
-                else if (t.state == GROWING) ch = t.watered_at ? toupper(c[t.crop]) : c[t.crop]; // toupper: 젖은 작물 표기용 대문자 변환
-                else  /* RIPE */ ch = '*';
+                if (in_field) {
+                    Tile t = farm[y-FIELD_Y0][x-FIELD_X0]; // 복사본
+                    refresh(t, server_now); // 표시용 단계 계산 
+                    const char* c = "?tcp"; // crop 1~3 -> t/c/p
+                    if (t.state == BARE) ch = '_';
+                    else if (t.state == TILLED) ch = '=';
+                    else if (t.state == GROWING) ch = t.watered_at ? toupper(c[t.crop]) : c[t.crop]; // toupper: 젖은 작물 표기용 대문자 변환
+                    else  /* RIPE */ ch = '*';
+                }
+
+                for (auto& [id, p]: clients) { // 플레이어가 있으면 덮어씀. '나'일 경우에는 '@' / 다른 사람은 'P'
+                    if (p.x == x && p.y == y) ch = (id == my_id) ? '@' : 'P';
+                }
+                putchar(ch); putchar(' ');
             }
-
-            for (auto& [id, p]: clients) { // 플레이어가 있으면 덮어씀. '나'일 경우에는 '@' / 다른 사람은 'P'
-                if (p.x == x && p.y == y) ch = (id == my_id) ? '@' : 'P';
-            }
-            putchar(ch); putchar(' ');
+            // 줄(y) 바꿈
+            putchar('\n');
         }
-        // 줄(y) 바꿈
-        putchar('\n');
+
+        printf("\n_: 맨땅 | =: 갈린땅 | t/c/p: 작물(마름) | T/C/P: 작물(젖음) | *: 작물 다 자람 | @: 나 | P: 다른 플레이어\n");
+        printf("wasd: 이동 | t: 갈기 | 1/2/3: 심기 | e: 물 | r: 수확 | q: 종료\n");
+
+        // 방향 적용 내 위치 출력 
+        if (clients.count(my_id)) {
+            printf("대상 칸: (%d, %d)\n", clients[my_id].x + face_dx, clients[my_id].y + face_dy);
+        }
+
+        printf("상점 및 인벤토리 열기: b\n");
     }
 
-    printf("\n_: 맨땅 | =: 갈린땅 | t/c/p: 작물(마름) | T/C/P: 작물(젖음) | *: 작물 다 자람 | @: 나 | P: 다른 플레이어\n");
-    printf("wasd: 이동 | t: 갈기 | 1/2/3: 심기 | e: 물 | r: 수확 | q: 종료\n");
-    
-    // 방향 적용 내 위치 출력 
-    if (clients.count(my_id)) {
-        printf("대상 칸: (%d, %d)\n", clients[my_id].x + face_dx, clients[my_id].y + face_dy);
-    }
 
     // 현재 버퍼 비우기
     fflush(stdout);
@@ -80,22 +113,37 @@ void send_action(int sock, char key) {
     uint16_t type;
     uint8_t crop = 0;
 
-    if (key == 't') type = PKT_TILL;
-    else if (key == '1') { type = PKT_PLANT; crop = 1; }
-    else if (key == '2') { type = PKT_PLANT; crop = 2; }
-    else if (key == '3') { type = PKT_PLANT; crop = 3; }
-    else if (key == 'e') type = PKT_WATER;
-    else if (key == 'r') type = PKT_HARVEST;
-    else return;
-
-    if (!clients.count(my_id)) return;
-    int tx = clients[my_id].x + face_dx;
-    int ty = clients[my_id].y + face_dy;
-
     std::string payload;
-    payload.push_back((uint8_t)tx);
-    payload.push_back((uint8_t)ty);
-    if (type == PKT_PLANT) payload.push_back(crop);
+
+    if (shop_open) {
+        if (key == '1') { type = PKT_BUY; crop = 1; }
+        else if (key == '2') { type = PKT_BUY; crop = 2; }
+        else if (key == '3') { type = PKT_BUY; crop = 3; }
+        else if (key == '!') { type = PKT_SELL; crop = 1; }
+        else if (key == '@') { type = PKT_SELL; crop = 2; }
+        else if (key == '#') { type = PKT_SELL; crop = 3; }
+        else return;
+
+        payload.push_back(crop);
+        payload.push_back((uint8_t)1); // TODO console 플레이에서는 1로 고정
+    } else {
+        if (key == 't') type = PKT_TILL;
+        else if (key == '1') { type = PKT_PLANT; crop = 1; }
+        else if (key == '2') { type = PKT_PLANT; crop = 2; }
+        else if (key == '3') { type = PKT_PLANT; crop = 3; }
+        else if (key == 'e') type = PKT_WATER;
+        else if (key == 'r') type = PKT_HARVEST;
+        else return;
+
+        if (!clients.count(my_id)) return;
+        int tx = clients[my_id].x + face_dx;
+        int ty = clients[my_id].y + face_dy;
+
+        payload.push_back((uint8_t)tx);
+        payload.push_back((uint8_t)ty);
+        if (type == PKT_PLANT) payload.push_back(crop);
+    }
+
 
     std::string pkt = make_packet(type, payload);
 
@@ -218,6 +266,15 @@ int main() {
                         farm[y-FIELD_Y0][x-FIELD_X0].crop = payload[3];
                         farm[y-FIELD_Y0][x-FIELD_X0].stage = payload[4];
                         farm[y-FIELD_Y0][x-FIELD_X0].watered_at = get_u64(payload, 5);
+                    } else if (type == PKT_WALLET) {
+                        my_coin = get_u32(payload, 0);
+
+                        int offset = 4;
+                        for (int i = 1 ; i < CROP_COUNT ; i++) {
+                            my_seeds[i] = payload[offset];
+                            my_held[i] = payload[offset+1];
+                            offset += 2;
+                        }
                     }
 
                     // 출력
@@ -233,30 +290,40 @@ int main() {
 
                 if (cnt <= 0) { closed = true; break; } // 0: 입력 닫힘, <0: 에러
                 
-                if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
-                    int dx = 0;
-                    int dy = 0;
-                    if (key == 'w') dy = -1;
-                    if (key == 's') dy = +1;
-                    if (key == 'a') dx = -1;
-                    if (key == 'd') dx = +1;
-                    
-                    // 방향 기억
-                    face_dx = dx;
-                    face_dy = dy;
-
-                    std::string payload;
-                    payload.push_back((int8_t)dx); // 1바이트인 int8_t로 캐스팅해서 넣기
-                    payload.push_back((int8_t)dy);
-                    
-                    std::string pkt = make_packet(PKT_MOVE, payload);
-
-                    ssize_t w = write(sock, pkt.data(), pkt.size());
-                    (void) w;
-                } else if (key == 'q') { // 종료 키
-                    closed = true;
+                if (shop_open) {
+                    if (key == 'q' || key == 'b') {
+                        shop_open = false;
+                    } else {
+                        send_action(sock, key);
+                    }
                 } else {
-                    send_action(sock, key);
+                    if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
+                        int dx = 0;
+                        int dy = 0;
+                        if (key == 'w') dy = -1;
+                        if (key == 's') dy = +1;
+                        if (key == 'a') dx = -1;
+                        if (key == 'd') dx = +1;
+                        
+                        // 방향 기억
+                        face_dx = dx;
+                        face_dy = dy;
+
+                        std::string payload;
+                        payload.push_back((int8_t)dx); // 1바이트인 int8_t로 캐스팅해서 넣기
+                        payload.push_back((int8_t)dy);
+                        
+                        std::string pkt = make_packet(PKT_MOVE, payload);
+
+                        ssize_t w = write(sock, pkt.data(), pkt.size());
+                        (void) w;
+                    } else if (key == 'q') { // 종료 키
+                        closed = true;
+                    } else if (key == 'b')  { // 상점 열기
+                        shop_open = true;
+                    } else {
+                        send_action(sock, key);
+                    }
                 }
 
                 continue;
