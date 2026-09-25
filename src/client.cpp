@@ -95,7 +95,7 @@ void send_action(int sock, char key) {
     std::string payload;
     payload.push_back((uint8_t)tx);
     payload.push_back((uint8_t)ty);
-    if (type == PKT_PLANT) payload.push_back((uint8_t)crop);
+    if (type == PKT_PLANT) payload.push_back(crop);
 
     std::string pkt = make_packet(type, payload);
 
