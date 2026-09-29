@@ -95,8 +95,8 @@ void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 �
     (void) w;
 }
 
-// 땅 업데이트 시 전송 / 칸 하나의 현재 값을 fd에게. x, y는 월드 좌표 
-void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
+// 칸 하나의 현재 값을 담은 TILE_UPDATE 패킷을 만든다
+std::string make_tile_update(int farm_owner_id, uint8_t x, uint8_t y) {
     std::string payload;
     Tile tile = farms[farm_owner_id].tiles[y-FIELD_Y0][x-FIELD_X0];
 
@@ -107,8 +107,21 @@ void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
     payload.push_back(tile.stage);
     put_u64(payload, tile.watered_at);
 
-    std::string pkt = make_packet(PKT_TILE_UPDATE, payload);
+    return make_packet(PKT_TILE_UPDATE, payload);
+}
 
+// 그 방(농장)에 있는 사람 전원에게 pkt 전송
+void send_to_room(int farm_owner_id, const std::string& pkt) {
+    for (auto& [cfd, c]: clients) {
+        if (c.current_farm != farm_owner_id) continue;
+        ssize_t w = write(cfd, pkt.data(), pkt.size());
+        (void) w;
+    }
+}
+
+// 땅 업데이트 시 요청자 한 명에게만 전송
+void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
+    std::string pkt = make_tile_update(farm_owner_id, x, y);
     ssize_t w = write(fd, pkt.data(), pkt.size());
     (void) w;
 }
@@ -198,26 +211,33 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     }
 
     // 5~6. 행동. 필요한 상태가 아니면 함수가 false를 돌려주고 칸은 그대로.
+    // false 시 요청자만 받고 true 시 방 전체 사람들이 받는다.
+    bool ok = false;
     switch (type) {
         case PKT_TILL:
-            till(t); break;
+            ok = till(t); break;
         case PKT_PLANT: {
-            if (plant(t, crop)) c.seeds[crop] -= 1;
+            ok = plant(t, crop);
+            if (ok) c.seeds[crop] -= 1;
             send_wallet(fd, c);
             break;
         }
         case PKT_WATER:
-            water(t, now); break;
+            ok = water(t, now); break;
         case PKT_HARVEST: {
             uint8_t crop = t.crop; // harvest로 비우기 전에 crop 읽기.
-            if (harvest(t)) c.held[crop] += 1;
+            ok = harvest(t);
+            if (ok) c.held[crop] += 1;
             send_wallet(fd, c);
             break;
         }
     }
 
-    // 요청자에게 그 칸의 현재 값 보내기
-    send_tile_update(fd, c.current_farm, x, y);
+    if (ok) {
+        send_to_room(c.current_farm, make_tile_update(c.current_farm, x, y)); // 성공 시 방 전원에게
+    } else {
+        send_tile_update(fd, c.current_farm, x, y); // 실패 시 요청자(수행자)에게만
+    }
 }
 
 void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) {
@@ -260,32 +280,22 @@ void on_tick() {
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
     
-    // --- 모든 클라이언트의 위치 스냅샷 생성
-    std::string payload;
-    
-    // 1) 클라이언트 수
-    int client_cnt = clients.size();
-    put_u16(payload, client_cnt);
-    
-    // 2) clients 순회하면서 [id:4][x:4][y:4]로 받기
-    for (auto& [cfd, client] : clients) {
-        put_u32(payload, cfd);
-        // TODO 좌표 크기 통일
-        put_u32(payload, client.x);
-        put_u32(payload, client.y);
-    }
-    
-    // 3) 완성 패킷: [length][type][payload]
-    std::string pkt = make_packet(PKT_SNAPSHOT, payload);
-    
-    // 4) 접속한 모두에게 전송
-    for (auto& [cfd, client] : clients) {
-        // write(int fd, const void* buf, size_t count);
-        // 두번째인자: 바이트 시작 주소, 세번째인자: 몇 바이트
-        ssize_t w =write(cfd, pkt.data(), pkt.size());
-        (void) w;
-        // pkt: string 객체, pkt.data(): 해당 문자열의 실제 바이트 배열의 첫 주소를 돌려줌
-        // pkt.size(): 그 바이트가 몇 개인지
+    for (auto& [owner, farm]: farms) { // 방(농장)마다
+        std::string body;
+        uint16_t client_cnt = 0;
+        for (auto& [cfd, c]: clients) {
+            if (c.current_farm != owner) continue;
+            put_u32(body, cfd);
+            put_u32(body, c.x);
+            put_u32(body, c.y);
+            client_cnt ++;
+        }
+        if (client_cnt == 0) continue; // 아무도 없는 방은 건너뜀
+
+        std::string payload;
+        put_u16(payload, client_cnt);
+        payload += body;
+        send_to_room(owner, make_packet(PKT_SNAPSHOT, payload));
     }
     
     tick++;
