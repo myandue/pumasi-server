@@ -3,23 +3,27 @@
 #include <cstdint>
 
 enum PacketType : uint16_t {
-    PKT_TICK = 1, // 서버 -> 클라: 지금 몇 tick 째인지
-    PKT_MOVE = 2, // 클라 -> 서버: client의 이동 수신
-    PKT_SNAPSHOT = 3, // 서버 -> 클라: 모든 플레이어의 좌표
-    PKT_WELCOME = 4, // 서버 -> 클라: 해당 클라의 fd 알려주기
+    PKT_TICK = 1, // (미사용) 서버 -> 클라: 지금 몇 tick 째인지
+    PKT_MOVE = 2, // 클라 -> 서버: [dx:1][dy:1]. client의 이동 (-1~1)
+    PKT_SNAPSHOT = 3, // 서버 -> 클라: [count:2] + count*[id:4][x:4][y:4]. 같은 방 사람들 위치, 매 tick 그 방 사람에게
+    PKT_WELCOME = 4, // 서버 -> 클라: [id:4]. 내 id(fd). 접속 직후 1회.
 
     PKT_TILL = 10, // 클라 -> 서버: [x:1][y:1]
     PKT_PLANT = 11, // 클라 -> 서버: [x:1][y:1][crop:1]
     PKT_WATER = 12, // 클라 -> 서버: [x:1][y:1]
-    PKT_HARVEST = 13, // 클라 -> 서버: [x:1][y:1]
+    PKT_HARVEST = 13, // 클라 -> 서버: [x:1][y:1]. 농장 주인만.
     
-    PKT_TILE_UPDATE = 20, // 서버 -> 클라: [x:1][y:1][state:1][crop:1][stage:1][watered_at:8]
-    PKT_FARM_SNAPSHOT = 21, // 서버 -> 클라 [server_now:8] + 36칸*[state:1][crop:1][stage:1][watered_at:8]
+    PKT_TILE_UPDATE = 20, // 서버 -> 클라: [x:1][y:1][state:1][crop:1][stage:1][watered_at:8]. 성공 시 방 전원, 거부 시 요청자만.
+    PKT_FARM_SNAPSHOT = 21, // 서버 -> 클라 [farm_owner_id:4][server_now:8] + 36칸*[state:1][crop:1][stage:1][watered_at:8]. 방 입장할 때마다
 
     PKT_BUY = 30, // 클라 -> 서버: [crop:1][count:1]
     PKT_SELL = 31, // 클라 -> 서버: [crop:1][count:1]
 
-    PKT_WALLET = 40, // 서버 -> 클라: [coin:4] + crop 1~3 각각 [seeds:1][held:1]
+    PKT_WALLET = 40, // 서버 -> 클라: [coin:4] + crop 1~3 각각 [seeds:1][held:1]. 접속 시 + 바뀔 때마다
+
+    PKT_VISIT = 50, // 클라 -> 서버: [farm_owner_id:4]. 그 농장 방으로 이동. 내 농장으로 = 내 id.
+
+    PKT_PLAYER_LIST = 60, // 서버 -> 클라: [count:2] + count*[id:4] 접속 중인 사람 목록. 접속·퇴장 시 전원에게.
 };
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기
@@ -59,11 +63,11 @@ inline std::string make_packet(uint16_t type, const std::string& payload) {
 
 // offset 위치 바이트와 offset+1 위치 바이트를 합쳐서 하나의 숫자로 만드는 작업
 // char 는 부호가 있는 타입이라 값이 오염될 수 있기 때문에 'unsigned char'로 캐스팅 후 연산 진행 
-inline uint16_t get_u16(std::string& buf, int offset) {
+inline uint16_t get_u16(const std::string& buf, int offset) {
     return (((unsigned char)buf[offset] << 8) | (unsigned char)buf[offset+1]);
 }
 
-inline uint32_t get_u32(std::string& buf, int offset) {
+inline uint32_t get_u32(const std::string& buf, int offset) {
     uint32_t payload = ((unsigned char)buf[offset] << 24);
     payload |= ((unsigned char)buf[offset+1] << 16);
     payload |= ((unsigned char)buf[offset+2] << 8);
@@ -71,7 +75,7 @@ inline uint32_t get_u32(std::string& buf, int offset) {
     return payload;
 }
 
-inline uint64_t get_u64(std::string& buf, int offset) {
+inline uint64_t get_u64(const std::string& buf, int offset) {
     // unsigned char는 계산에 들어가는 순간 32비트 int로 바뀐다.
     // 32비트 값을 32칸 이상 밀면 결과가 망가지기 때문에 64비트로 먼저 바꿔줘야한다.
     uint64_t payload = ((uint64_t)(unsigned char)buf[offset] << 56);

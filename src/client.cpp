@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <unordered_map>
 #include <cctype> // console에서 작물 물 여부 표시(대문자)를 위함 
+#include <vector>
 
 #include <termios.h>
 
@@ -19,7 +20,7 @@ struct Client {
     int x;
     int y;
 };
-std::unordered_map<int, Client> clients;
+std::unordered_map<int, Client> clients; // 현재 같은 방에 존재하는 client들 
 
 Tile farm[FIELD_SIZE][FIELD_SIZE];
 int my_id = -1;
@@ -36,8 +37,21 @@ int my_held[CROP_COUNT] = {0};
 // 상점 창
 bool shop_open = false;
 
+// 유저 선택(방문 목적) 창
+bool visit_open = false;
+
 // 현재 농장 주인
 int farm_owner = -1;
+
+// 전체 유저 목록
+std::vector<int> players;
+
+// 나를 뺀 접속자 목록 (화면과 키 처리가 같은 순서를 써야 함)
+std::vector<int> others() {
+    std::vector<int> v;
+    for (int id : players) if (id != my_id) v.push_back(id);
+    return v;
+}
 
 int epfd = epoll_create1(0);
 
@@ -58,6 +72,15 @@ void draw_shop() {
     printf("닫기: b 또는 q\n");
 } 
 
+// 유저 선택(방문 목적) 창
+void draw_visit() {
+    printf("=== 방문 ===\n");
+    std::vector<int> o = others();
+    if (o.empty()) printf("(방문할 사람 없음)\n");
+    for (size_t i = 0 ; i < o.size() ; i++) printf("%zu. %d번 농장\n", i + 1, o[i]);
+    printf("\n번호: 방문 | h: 내 농장으로 | v/q: 닫기\n");
+}
+
 // 밭과 플레이어를 10*10 격자로 그린다
 void draw() {
     uint64_t server_now = (uint64_t)((int64_t)now_ms() + server_offset);
@@ -67,6 +90,8 @@ void draw() {
 
     if (shop_open) { // 상점 창
         draw_shop();
+    } else if (visit_open) { // 유저 리스트 창
+        draw_visit();
     } else {
         for (int y = WORLD_MIN ; y <= WORLD_MAX ; y++) {
             for (int x = WORLD_MIN ; x <= WORLD_MAX ; x++) {
@@ -104,6 +129,7 @@ void draw() {
         }
 
         printf("상점 및 인벤토리 열기: b\n");
+        printf("방문 가능한 플레이어 리스트 보기: v\n");
     }
 
 
@@ -150,6 +176,15 @@ void send_action(int sock, char key) {
 
     std::string pkt = make_packet(type, payload);
 
+    ssize_t w = write(sock, pkt.data(), pkt.size());
+    (void) w;
+}
+
+// 다른 사람 농장 방문
+void send_visit(int sock, int owner) {
+    std::string payload;
+    put_u32(payload, owner);
+    std::string pkt = make_packet(PKT_VISIT, payload);
     ssize_t w = write(sock, pkt.data(), pkt.size());
     (void) w;
 }
@@ -279,6 +314,13 @@ int main() {
                             my_held[i] = payload[offset+1];
                             offset += 2;
                         }
+                    } else if (type == PKT_PLAYER_LIST) {
+                        players.clear();
+                        int player_cnt = get_u16(payload, 0);
+
+                        for (int i = 0 ; i < player_cnt ; i++) {
+                            players.push_back(get_u32(payload, i*4 + 2));
+                        }
                     }
 
                     // 출력
@@ -299,6 +341,17 @@ int main() {
                         shop_open = false;
                     } else {
                         send_action(sock, key);
+                    }
+                } else if (visit_open) {
+                    std::vector<int> o = others();
+                    if (key >= '1' && key <= '9' && (size_t)(key - '1') < o.size()) {
+                        send_visit(sock, o[key-'1']);
+                        visit_open = false;
+                    } else if (key == 'h') { // 내 방으로
+                        send_visit(sock, my_id);
+                        visit_open = false;
+                    } else if (key == 'v' || key == 'q') {
+                        visit_open = false;
                     }
                 } else {
                     if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
@@ -325,6 +378,8 @@ int main() {
                         closed = true;
                     } else if (key == 'b')  { // 상점 열기
                         shop_open = true;
+                    } else if (key == 'v') {
+                        visit_open = true;
                     } else {
                         send_action(sock, key);
                     }

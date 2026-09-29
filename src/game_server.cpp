@@ -63,6 +63,19 @@ void send_welcome(int fd) {
     (void) w;
 }
 
+// 접속 중인 사람 목록을 전원에게
+void broadcast_player_list() {
+    std::string payload;
+    put_u16(payload, clients.size());
+    for (auto& [cfd, c]: clients) put_u32(payload, cfd);
+    
+    std::string pkt = make_packet(PKT_PLAYER_LIST, payload);
+    for (auto& [cfd, c]: clients) {
+        ssize_t w = write(cfd, pkt.data(), pkt.size());
+        (void) w;
+    }
+}
+
 // 농장 입장할 때 마다: 입장한 농장 + 서버 현재 시각 + 밭 전체 스냅샷
 void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 농장의 owner
     std::string payload;
@@ -140,6 +153,18 @@ void send_wallet(int fd, Client& c) {
 
     ssize_t w = write(fd, pkt.data(), pkt.size());
     (void) w;
+}
+
+// 방문 처리
+void handle_visit(int fd, Client& c, const std::string& payload) {
+    if (payload.size() != 4) return;
+    int owner = (int)get_u32(payload, 0);
+    if (!farms.count(owner)) return; // 없는 농장이면 무시
+    if (owner == c.current_farm) return; // 이미 그 방이면 무시
+
+    c.current_farm = owner;
+    c.x = 0; c.y = 0; // 새 방은 입구(0,0)에서 시작
+    send_farm_snapshot(fd, owner);
 }
 
 // move
@@ -223,7 +248,12 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
             break;
         }
         case PKT_WATER:
-            ok = water(t, now); break;
+            ok = water(t, now); 
+            if (ok && c.current_farm != fd) { // 남의 농장에 물 줌 = 방문자 보상
+                c.coin += 2;
+                send_wallet(fd, c);
+            }            
+            break;
         case PKT_HARVEST: {
             uint8_t crop = t.crop; // harvest로 비우기 전에 crop 읽기.
             ok = harvest(t);
@@ -309,6 +339,8 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
             handle_farm_action(fd, c, type, payload); break;
         case PKT_BUY: case PKT_SELL:
             handle_wallet(fd, c, type, payload); break;
+        case PKT_VISIT:
+            handle_visit(fd, c, payload); break;
         default:
             break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }
@@ -399,6 +431,7 @@ int main() {
                     send_welcome(client_fd);
                     send_farm_snapshot(client_fd, client_fd); // (받는 사람, 어느 농장)
                     send_wallet(client_fd, clients[client_fd]);
+                    broadcast_player_list();
 
                     continue;
                 } else {
@@ -454,10 +487,18 @@ int main() {
                     
                     if (closed) {
                         if (clients.count(fd)) {
+                            // 이 사람의 농장에 와 있던 방문자들 각자 자기 농장으로
+                            for (auto& [cfd, c]: clients) {
+                                if (cfd == fd || c.current_farm != fd) continue;
+                                c.current_farm = cfd; // 본인 농장
+                                c.x = 0; c.y = 0; // 입장 시 위치 초기화
+                                send_farm_snapshot(cfd, cfd);
+                            }
                             clients.erase(fd);
                             if (farms.count(fd)) {
                                 farms.erase(fd);
                             }
+                            broadcast_player_list();
                         }
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         close(fd);
