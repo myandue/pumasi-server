@@ -36,6 +36,9 @@ int my_held[CROP_COUNT] = {0};
 // 상점 창
 bool shop_open = false;
 
+// 현재 농장 주인
+int farm_owner = -1;
+
 int epfd = epoll_create1(0);
 
 // 상점 창
@@ -246,11 +249,12 @@ int main() {
                         // 서버에서의 내 id 값 받기
                         my_id = get_u32(payload, 0);
                     } else if (type == PKT_FARM_SNAPSHOT) {
-                        server_offset = (int64_t)get_u64(payload, 0) - (int64_t)now_ms(); // 부호가 필요한 계산에서는 int로 캐스팅을 해준다
+                        farm_owner = get_u32(payload, 0); // 누구 농장인지 
+                        server_offset = (int64_t)get_u64(payload, 4) - (int64_t)now_ms(); // 부호가 필요한 계산에서는 int로 캐스팅을 해준다
 
                         for (int i = 0 ; i < FIELD_SIZE ; i++) {
                             for (int j = 0 ; j < FIELD_SIZE ; j++) {
-                                int offset = 8 + (i*FIELD_SIZE + j)*11;
+                                int offset = 12 + (i*FIELD_SIZE + j)*11;
 
                                 farm[i][j].state = payload[offset];
                                 farm[i][j].crop = payload[offset+1];

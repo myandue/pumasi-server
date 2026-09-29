@@ -37,9 +37,14 @@ struct Client {
     int coin = 100;
     int seeds[CROP_COUNT] = {0};
     int held[CROP_COUNT] = {0};
+
+    // 지금 보고 있는 농장의 주인 id
+    int current_farm = -1;
 };
 std::unordered_map<int, Client> clients;
-Tile farm[FIELD_SIZE][FIELD_SIZE]; // farm[y][x]
+
+struct Farm { Tile tiles[FIELD_SIZE][FIELD_SIZE]; };
+std::unordered_map<int, Farm> farms; // 키 = 주인id(fd)
 
 int epfd = epoll_create1(0); // 장부 개설
 
@@ -58,22 +63,27 @@ void send_welcome(int fd) {
     (void) w;
 }
 
-// 접속 직후 1회: 서버 현재 시각 + 밭 전체 스냅샷
-void send_farm_snapshot(int fd) {
+// 농장 입장할 때 마다: 입장한 농장 + 서버 현재 시각 + 밭 전체 스냅샷
+void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 농장의 owner
     std::string payload;
+
+    // 0) owner_id
+    put_u32(payload, farm_owner_id);
 
     // 1) server_now 8바이트
     uint64_t now = now_ms();
     put_u64(payload, now);
 
     // 2) farm. 보내기 직전에 refresh.
+    Farm& f = farms[farm_owner_id];
+
     for (int i = 0 ; i < FIELD_SIZE ; i++) {
         for (int j = 0 ; j < FIELD_SIZE ; j++) {
-            refresh(farm[i][j], now);
-            payload.push_back(farm[i][j].state);
-            payload.push_back(farm[i][j].crop);
-            payload.push_back(farm[i][j].stage);
-            put_u64(payload, farm[i][j].watered_at);
+            refresh(f.tiles[i][j], now);
+            payload.push_back(f.tiles[i][j].state);
+            payload.push_back(f.tiles[i][j].crop);
+            payload.push_back(f.tiles[i][j].stage);
+            put_u64(payload, f.tiles[i][j].watered_at);
         }
     }
 
@@ -86,9 +96,9 @@ void send_farm_snapshot(int fd) {
 }
 
 // 땅 업데이트 시 전송 / 칸 하나의 현재 값을 fd에게. x, y는 월드 좌표 
-void send_tile_update(int fd, uint8_t x, uint8_t y) {
+void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
     std::string payload;
-    Tile tile = farm[y-FIELD_Y0][x-FIELD_X0];
+    Tile tile = farms[farm_owner_id].tiles[y-FIELD_Y0][x-FIELD_X0];
 
     payload.push_back(x);
     payload.push_back(y);
@@ -166,18 +176,24 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     // 참고로 1, 2의 경우 정상 클라 코드라면 만들 수 없는 값이기 때문에 바로 return을 주며 무시를,
     // 3, 5의 경우 클라가 요청할 수 있는 값이기 때문에 `send_tile_update`로 응답을 주며 거부한다.
     if (abs(c.x - x) > 1 || abs(c.y - y) > 1) {
-        send_tile_update(fd, x, y); // 현재 '틀렸다'라는 응답을 받지는 않는다. 그저 응답.
+        send_tile_update(fd, c.current_farm, x, y); // 현재 '틀렸다'라는 응답을 받지는 않는다. 그저 응답.
+        return;
+    }
+
+    // '수확'의 경우, 수행 유저와 농장주가 다르다면 거부
+    if (type == PKT_HARVEST && fd != c.current_farm) {
+        send_tile_update(fd, c.current_farm, x, y);
         return;
     }
 
     // 4. 갱신
-    Tile& t = farm[y-FIELD_Y0][x-FIELD_X0];
+    Tile& t = farms[c.current_farm].tiles[y-FIELD_Y0][x-FIELD_X0];
     uint64_t now = now_ms();
     refresh(t, now);
 
     // 씨앗을 갖고있지 않다면 거부
     if (type == PKT_PLANT && c.seeds[crop] < 1) {
-        send_tile_update(fd, x, y);
+        send_tile_update(fd, c.current_farm, x, y);
         return;
     }
 
@@ -201,7 +217,7 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     }
 
     // 요청자에게 그 칸의 현재 값 보내기
-    send_tile_update(fd, x, y);
+    send_tile_update(fd, c.current_farm, x, y);
 }
 
 void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) {
@@ -367,8 +383,11 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
+                    clients[client_fd].current_farm = client_fd; // 자기 농장에 입장
+                    farms[client_fd] = Farm{};
+
                     send_welcome(client_fd);
-                    send_farm_snapshot(client_fd);
+                    send_farm_snapshot(client_fd, client_fd); // (받는 사람, 어느 농장)
                     send_wallet(client_fd, clients[client_fd]);
 
                     continue;
@@ -426,6 +445,9 @@ int main() {
                     if (closed) {
                         if (clients.count(fd)) {
                             clients.erase(fd);
+                            if (farms.count(fd)) {
+                                farms.erase(fd);
+                            }
                         }
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         close(fd);
