@@ -2,6 +2,8 @@
 #include <string>
 #include <cstdint>
 
+const size_t CHAT_MAX = 200; // 메시지 최대 바이트
+
 enum PacketType : uint16_t {
     PKT_TICK = 1, // (미사용) 서버 -> 클라: 지금 몇 tick 째인지
     PKT_MOVE = 2, // 클라 -> 서버: [dx:1][dy:1]. client의 이동 (-1~1)
@@ -22,8 +24,10 @@ enum PacketType : uint16_t {
     PKT_WALLET = 40, // 서버 -> 클라: [coin:4] + crop 1~3 각각 [seeds:1][held:1]. 접속 시 + 바뀔 때마다
 
     PKT_VISIT = 50, // 클라 -> 서버: [farm_owner_id:4]. 그 농장 방으로 이동. 내 농장으로 = 내 id.
+    PKT_CHAT = 51, // 클라 -> 서버: 메시지 바이트(UTF-8). 길이는 프레임 헤더에.
 
     PKT_PLAYER_LIST = 60, // 서버 -> 클라: [count:2] + count*[id:4] 접속 중인 사람 목록. 접속·퇴장 시 전원에게.
+    PKT_CHAT_MSG = 61, // 서버 -> 클라: [sender_id:4] + 메시지 바이트. 같은 방 전원에게.
 };
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기

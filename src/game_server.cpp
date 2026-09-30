@@ -167,6 +167,19 @@ void handle_visit(int fd, Client& c, const std::string& payload) {
     send_farm_snapshot(fd, owner);
 }
 
+// 채팅
+void handle_chat(int fd, Client& c, const std::string& payload) {
+    if (payload.empty() || payload.size() > CHAT_MAX) return; // 빈 메시지 or 너무 긴 메시지(클라쪽에서 입력 막음): 무시
+    for (unsigned char ch : payload)
+        if (ch < 0x20 || ch == 0x7f) return; // 제어문자가 섞이면 무시
+
+    std::string out;
+    put_u32(out, fd); // 보낸 사람
+    out += payload;
+    send_to_room(c.current_farm, make_packet(PKT_CHAT_MSG, out)); // 같은 방 전원 (보낸 사람 포함)
+
+}
+
 // move
 void handle_move(Client& c, const std::string& payload) {
     if (payload.size() != 2) return;
@@ -341,6 +354,8 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
             handle_wallet(fd, c, type, payload); break;
         case PKT_VISIT:
             handle_visit(fd, c, payload); break;
+        case PKT_CHAT:
+            handle_chat(fd, c, payload); break;
         default:
             break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }

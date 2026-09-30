@@ -117,7 +117,9 @@ flowchart LR
 | 30 / 31 | BUY / SELL | 클라→서버 | `[crop:1][count:1]` |
 | 40 | WALLET | 서버→클라 | `[coin:4]` + 작물별 `[seeds:1][held:1]` |
 | 50 | VISIT | 클라→서버 | `[owner_id:4]` — 내 농장으로 = 내 id |
+| 51 | CHAT | 클라→서버 | 메시지 바이트(UTF-8), 최대 200바이트 |
 | 60 | PLAYER_LIST | 서버→클라 | `[count:2]` + count×`[id:4]` — 접속·퇴장 시 전원 |
+| 61 | CHAT_MSG | 서버→클라 | `[sender_id:4]` + 메시지 바이트 — 같은 방 전원 |
 
 ## 빌드 & 실행
 
@@ -162,7 +164,7 @@ g++ -std=c++17 -o protocol_test src/protocol_test.cpp && ./protocol_test  # u64 
 - [x] 코어 루프 (갈기·심기·물·성장·수확)
 - [x] 상점·인벤토리·코인
 - [x] 방·방문·방 단위 동기화
-- [ ] 채팅 (진행 중)
+- [x] 채팅
 - [ ] Unity 클라이언트
 - [ ] DB 저장·로그인 (DB 호출은 워커 스레드로 분리)
 - [ ] 주인이 오프라인인 농장 방문 (DB 로드/언로드)
