@@ -64,6 +64,8 @@ flowchart LR
         P[(clients<br/>위치·코인·인벤·현재 방)]
         R[send_to_room<br/>같은 방에만 전송]
     end
+    A & B -. 접속 .-> L
+    L --> P
     A & B -- TCP 바이너리 --> C
     C --> H
     H --> F
