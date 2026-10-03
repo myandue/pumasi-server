@@ -5,7 +5,7 @@
 
 C++17 / Linux epoll 기반 server-authoritative 서버와 콘솔 클라이언트.
 
-> **진행 중** — 코어 루프, 상점·인벤토리, 방·방문까지 완료. 채팅, DB 저장·로그인은 예정 ([로드맵](#로드맵))
+> **진행 중** — 코어 루프, 상점·인벤토리, 방·방문, 채팅까지 완료. DB 저장·로그인은 예정 ([로드맵](#로드맵))
 
 ## 화면
 
@@ -59,7 +59,7 @@ flowchart LR
         L[listen_fd<br/>접속 수락]
         T[timer_fd<br/>50ms tick]
         C[client_fd ET<br/>프레임 파싱]
-        H[handle_packet<br/>이동·농사·상점·방문]
+        H[handle_packet<br/>이동·농사·상점·방문·채팅]
         F[(farms<br/>주인 id별 밭 36칸)]
         P[(clients<br/>위치·코인·인벤·현재 방)]
         R[send_to_room<br/>같은 방에만 전송]
@@ -72,7 +72,7 @@ flowchart LR
     H --> P
     H --> R
     T --> R
-    R -- 위치 스냅샷·칸 갱신 --> A & B
+    R -- 위치 스냅샷·칸 갱신·채팅 --> A & B
 ```
 
 ## 설계 결정 & 트레이드오프
@@ -139,6 +139,7 @@ g++ -std=c++17 -O2 -o client src/client.cpp
 | `t` / `1` `2` `3` / `e` / `r` | 갈기 / 심기(순무·당근·호박) / 물 / 수확 |
 | `b` | 상점: `1` `2` `3` 씨앗 사기, `Shift`+`1` `2` `3` 수확물 팔기, `b` 닫기 |
 | `v` | 방문: 번호로 농장 선택, `h` 내 농장으로, `v` 닫기 |
+| `Enter` | 채팅: 입력창 열기, 입력 후 `Enter` 전송, `Esc` 취소, `Backspace` 한 글자 지우기 |
 | `q` | 종료 (상점·방문 창에서는 닫기) |
 
 ## 테스트
@@ -157,7 +158,7 @@ g++ -std=c++17 -o protocol_test src/protocol_test.cpp && ./protocol_test  # u64 
 - [scope.md](docs/scope.md) — 전체 스코프, 완료 기준
 - [01-core-loop.md](docs/01-core-loop.md) — 칸 데이터, 상태 전이, 시간 계산, 패킷, 서버 검증
 - [02-shop-inventory-coin.md](docs/02-shop-inventory-coin.md) — 코인·인벤토리, 상점
-- [03.md](docs/03.md) — 방·방문·소유권
+- [03.md](docs/03.md) — 방·방문·채팅·소유권
 
 ## 로드맵
 
