@@ -158,7 +158,8 @@ g++ -std=c++17 -o protocol_test src/protocol_test.cpp && ./protocol_test  # u64 
 - [scope.md](docs/scope.md) — 전체 스코프, 완료 기준
 - [01-core-loop.md](docs/01-core-loop.md) — 칸 데이터, 상태 전이, 시간 계산, 패킷, 서버 검증
 - [02-shop-inventory-coin.md](docs/02-shop-inventory-coin.md) — 코인·인벤토리, 상점
-- [03.md](docs/03.md) — 방·방문·채팅·소유권
+- [03-room-visit-chat.md](docs/03-room-visit-chat.md) — 방·방문·채팅·소유권
+- [05-db-login.md](docs/05-db-login.md) — DB 저장, 가입·로그인, 워커풀
 
 ## 로드맵
 
