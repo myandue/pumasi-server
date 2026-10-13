@@ -19,9 +19,18 @@
 #include <queue>
 #include <vector>
 #include <mutex>
+#include <mysql/mysql.h>
 
 #include "./protocol.h"
 #include "./farm.h"
+#include "./thread_pool.h"
+
+MYSQL* db = nullptr;
+
+std::queue<std::function<void()>> db_results; // 워커 -> 메인으로 보낼 일 (db 워커가 결과 보내는 곳)
+std::mutex db_results_mtx;
+int db_event_fd = -1;
+bool server_running = true;
 
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
@@ -53,6 +62,17 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
+
+// 워커에서 부름: 메인 스레드가 실행할 함수를 넣고 초인종 울리기 (event_fd)
+void post_to_main(std::function<void()> fn) {
+    {
+        std::lock_guard<std::mutex> lock(db_results_mtx);
+        db_results.push(std::move(fn));
+    }
+    uint64_t one = 1;
+    ssize_t w = write(db_event_fd, &one, sizeof(one));
+    (void) w;
+}
 
 // 클라한테 해당 클라의 id(fd) 전송
 void send_welcome(int fd) {
@@ -364,6 +384,33 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
 int main() {
     signal(SIGPIPE, SIG_IGN); // SIGPIPE 무시 (프로세스 안 죽음)
 
+    // 0) DB 설정
+    // db_event_fd 등록
+    db_event_fd = eventfd(0, EFD_NONBLOCK); // (초기값, 플래그 - 논블로킹(대기x.에러로 즉시반환))
+
+    struct epoll_event d_ev;
+    d_ev.events = EPOLLIN;
+    d_ev.data.fd = db_event_fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, db_event_fd, &d_ev);
+
+    mysql_library_init(0, nullptr, nullptr); // 라이브러리 초기화: 스레드 만들기 전에 한 번
+    ThreadPool db_pool(1); // 워커 스레드 한 개 생성
+
+    // 생성된 스레드의 첫 작업 - DB와의 연결 작업 진행하라고 잡큐에 넣어주기 
+    db_pool.enqueue([]{
+        const char* pw = std::getenv("PUMASI_DB_PW");
+        db = mysql_init(nullptr);
+        if (!mysql_real_connect(db, "localhost", "pumasi", pw, "pumasi", 0, nullptr, 0)) {
+            printf("connect fail: %s\n", mysql_error(db));
+            post_to_main([] { // 메인에 "서버 종료" 넘기기
+                printf("db 연결 실패로 서버 종료\n");
+                server_running = false;
+            });
+        } else {
+            printf("db connected\n");
+        }
+    });
+
     // 1) 듣기 소켓 준비
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {perror("socket"); return 1;}
@@ -408,7 +455,7 @@ int main() {
     struct epoll_event events[64]; // 준비된 것 받아올 배열 
 
     // 3) 이벤트 루프
-    while (true) {
+    while (server_running) {
         // <-> select 자리. 준비된 것만 events[]에 담고 개수 n 리턴
         int n = epoll_wait(epfd, events, 64, -1); // -1 = 무한 대기
         if(n < 0) { perror("epoll_wait"); break;}
@@ -416,6 +463,24 @@ int main() {
         // <-> 준비된 n개만 순회
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd; // 이 이벤트 주인 fd
+
+            if (fd == db_event_fd) {
+                uint64_t cnt;
+                ssize_t r = read(db_event_fd, &cnt, sizeof(cnt));
+                (void) r;
+
+                std::queue<std::function<void()>> local;
+                {
+                    std::lock_guard<std::mutex> lock(db_results_mtx);
+                    std::swap(local, db_results);
+                }
+
+                while(!local.empty()) {
+                    local.front()(); // 맨 앞의 함수(`local.front()`)를 받아서 실행(`()`)
+                    local.pop();
+                }
+                continue;
+            }
 
             if (fd == timer_fd) {
                 uint64_t expirations;
