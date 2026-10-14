@@ -29,6 +29,7 @@ MYSQL* db = nullptr;
 
 std::queue<std::function<void()>> db_results; // 워커 -> 메인으로 보낼 일 (db 워커가 결과 보내는 곳)
 std::mutex db_results_mtx;
+ThreadPool* db_pool = nullptr; // main 밖 함수에서 사용하므로 전역 선언 
 int db_event_fd = -1;
 bool server_running = true;
 
@@ -339,6 +340,28 @@ void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) 
     }
 }
 
+void handle_signup(int fd, std::string payload) {
+    if (payload.empty()) return;
+    
+    uint8_t nick_len = payload[0];
+    if (nick_len == 0 || nick_len > 16) {
+        return;
+    }
+    std::string nick = payload.substr(1, nick_len);
+    payload.erase(0, 1 + nick_len);
+
+    uint8_t pw_len = payload[0];
+    if (pw_len == 0 || pw_len > 16) {
+        return;
+    }
+    std::string pw = payload.substr(1, pw_len);
+    payload.erase(0, 1 + pw_len);
+
+    db_pool -> enqueue([]{
+        // db에 insert?
+    });
+}
+
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
@@ -394,10 +417,11 @@ int main() {
     epoll_ctl(epfd, EPOLL_CTL_ADD, db_event_fd, &d_ev);
 
     mysql_library_init(0, nullptr, nullptr); // 라이브러리 초기화: 스레드 만들기 전에 한 번
-    ThreadPool db_pool(1); // 워커 스레드 한 개 생성
+    ThreadPool db_pool_tmp(1); // 워커 스레드 한 개 생성
+    db_pool = &db_pool_tmp;
 
     // 생성된 스레드의 첫 작업 - DB와의 연결 작업 진행하라고 잡큐에 넣어주기 
-    db_pool.enqueue([]{
+    db_pool -> enqueue([]{
         const char* pw = std::getenv("PUMASI_DB_PW");
         db = mysql_init(nullptr);
         if (!mysql_real_connect(db, "localhost", "pumasi", pw, "pumasi", 0, nullptr, 0)) {
