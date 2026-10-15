@@ -2,6 +2,14 @@
 #include <string>
 #include <cstdint>
 
+enum AuthResult : uint8_t {
+    AUTH_OK = 0,
+    AUTH_BAD_FORMAT = 1, // 형식 오류 (길이 등)
+    AUTH_DUP_NICK = 2, // 닉네임 중복
+    AUTH_WRONG = 3, // 닉네임·비밀번호 불일치
+    AUTH_SERVER_ERROR = 4, // DB 오류 등
+};
+
 const size_t CHAT_MAX = 200; // 메시지 최대 바이트
 
 enum PacketType : uint16_t {
@@ -28,6 +36,11 @@ enum PacketType : uint16_t {
 
     PKT_PLAYER_LIST = 60, // 서버 -> 클라: [count:2] + count*[id:4] 접속 중인 사람 목록. 접속·퇴장 시 전원에게.
     PKT_CHAT_MSG = 61, // 서버 -> 클라: [sender_id:4] + 메시지 바이트. 같은 방 전원에게.
+
+    PKT_SIGNUP = 70, // 클라 -> 서버: [nick_len:1][nick][pw_len:1][pw]
+    PKT_LOGIN = 71, // 클라 -> 서버: [nick_len:1][nick][pw_len:1][pw]
+
+    PKT_AUTH_RESULT = 80, // 서버 -> 클라: [reason:1][account_id:4]
 };
 
 // uint16을 빅엔디안 2바이트로 buf 끝에 붙이기

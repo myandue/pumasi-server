@@ -19,18 +19,12 @@
 #include <queue>
 #include <vector>
 #include <mutex>
-#include <mysql/mysql.h>
 
 #include "./protocol.h"
+#include "./db.h"
 #include "./farm.h"
 #include "./thread_pool.h"
 
-MYSQL* db = nullptr;
-
-std::queue<std::function<void()>> db_results; // 워커 -> 메인으로 보낼 일 (db 워커가 결과 보내는 곳)
-std::mutex db_results_mtx;
-ThreadPool* db_pool = nullptr; // main 밖 함수에서 사용하므로 전역 선언 
-int db_event_fd = -1;
 bool server_running = true;
 
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
@@ -63,17 +57,6 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
-
-// 워커에서 부름: 메인 스레드가 실행할 함수를 넣고 초인종 울리기 (event_fd)
-void post_to_main(std::function<void()> fn) {
-    {
-        std::lock_guard<std::mutex> lock(db_results_mtx);
-        db_results.push(std::move(fn));
-    }
-    uint64_t one = 1;
-    ssize_t w = write(db_event_fd, &one, sizeof(one));
-    (void) w;
-}
 
 // 클라한테 해당 클라의 id(fd) 전송
 void send_welcome(int fd) {
@@ -172,6 +155,15 @@ void send_wallet(int fd, Client& c) {
 
     std::string pkt = make_packet(PKT_WALLET, payload);
 
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
+
+void send_auth_result(int fd, uint8_t reason, uint32_t account_id) {
+    std::string payload;
+    payload += (char) reason;
+    put_u32(payload, account_id);
+    std::string pkt = make_packet(PKT_AUTH_RESULT, payload);
     ssize_t w = write(fd, pkt.data(), pkt.size());
     (void) w;
 }
@@ -344,21 +336,41 @@ void handle_signup(int fd, std::string payload) {
     if (payload.empty()) return;
     
     uint8_t nick_len = payload[0];
-    if (nick_len == 0 || nick_len > 16) {
+    std::string nick = payload.substr(1, nick_len);
+
+    int chars = 0;
+    for (unsigned char uc : nick) {
+        if ((uc & 0xC0) != 0x80) chars++;
+        // `client.cpp`에서 chat 처리할 때 내용 참고. 
+        // '한 글자'의 '첫 바이트' 개수를 세는 과정. '한 글자'의 '첫 바이트'만이 앞 2비트가 `10`이 아니다.
+    }
+    if (chars < 2 || chars > 15) {
+        send_auth_result(fd, AUTH_BAD_FORMAT, 0); // 닉네임 길이: 2 ~ 15
         return;
     }
-    std::string nick = payload.substr(1, nick_len);
     payload.erase(0, 1 + nick_len);
 
     uint8_t pw_len = payload[0];
-    if (pw_len == 0 || pw_len > 16) {
+    std::string pw = payload.substr(1, pw_len);
+
+    chars = 0;
+    for (unsigned char uc : pw) {
+        if ((uc & 0xC0) != 0x80) chars++;
+    }
+    if (chars < 6 || chars > 15) {
+        send_auth_result(fd, AUTH_BAD_FORMAT, 0); // pw 길이: 6 ~ 15
         return;
     }
-    std::string pw = payload.substr(1, pw_len);
     payload.erase(0, 1 + pw_len);
 
-    db_pool -> enqueue([]{
-        // db에 insert?
+    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+        uint32_t id = 0;
+        uint8_t reason = signup_db(nick, pw, id);
+
+        post_to_main([fd, reason, id] {
+            if (!clients.count(fd)) return;
+            send_auth_result(fd, reason, id);
+        });
     });
 }
 
@@ -399,6 +411,8 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
             handle_visit(fd, c, payload); break;
         case PKT_CHAT:
             handle_chat(fd, c, payload); break;
+        case PKT_SIGNUP:
+            handle_signup(fd, payload); break;
         default:
             break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }
@@ -416,22 +430,17 @@ int main() {
     d_ev.data.fd = db_event_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, db_event_fd, &d_ev);
 
-    mysql_library_init(0, nullptr, nullptr); // 라이브러리 초기화: 스레드 만들기 전에 한 번
+    if (!db_init()) return 1;
     ThreadPool db_pool_tmp(1); // 워커 스레드 한 개 생성
     db_pool = &db_pool_tmp;
 
     // 생성된 스레드의 첫 작업 - DB와의 연결 작업 진행하라고 잡큐에 넣어주기 
     db_pool -> enqueue([]{
-        const char* pw = std::getenv("PUMASI_DB_PW");
-        db = mysql_init(nullptr);
-        if (!mysql_real_connect(db, "localhost", "pumasi", pw, "pumasi", 0, nullptr, 0)) {
-            printf("connect fail: %s\n", mysql_error(db));
-            post_to_main([] { // 메인에 "서버 종료" 넘기기
+        if (!db_connect()) {
+            post_to_main([] {
                 printf("db 연결 실패로 서버 종료\n");
                 server_running = false;
             });
-        } else {
-            printf("db connected\n");
         }
     });
 
@@ -489,20 +498,7 @@ int main() {
             int fd = events[i].data.fd; // 이 이벤트 주인 fd
 
             if (fd == db_event_fd) {
-                uint64_t cnt;
-                ssize_t r = read(db_event_fd, &cnt, sizeof(cnt));
-                (void) r;
-
-                std::queue<std::function<void()>> local;
-                {
-                    std::lock_guard<std::mutex> lock(db_results_mtx);
-                    std::swap(local, db_results);
-                }
-
-                while(!local.empty()) {
-                    local.front()(); // 맨 앞의 함수(`local.front()`)를 받아서 실행(`()`)
-                    local.pop();
-                }
+                drain_db_results();
                 continue;
             }
 

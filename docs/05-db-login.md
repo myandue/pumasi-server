@@ -48,7 +48,7 @@
     - PKT_SIGNUP (70), payload: [nick_len:1][nick][pw_len:1][pw]
     - PKT_LOGIN (71), payload: 70과 동일
 - 서버 -> 클라
-    - PKT_AUTH_RESULT (80), payload: [ok:1][reason:1][account_id:4]
+    - PKT_AUTH_RESULT (80), payload: [reason:1][account_id:4]
         - reason: 닉네임 중복 / 닉네임·비번 틀림 / 형식 오류 등
 - 바뀌는 것
     - PKT_WELCOME (4): 접속 직후 fd 전송 -> 없앰. 내 id는 AUTH_RESULT로.
