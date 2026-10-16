@@ -21,6 +21,7 @@
 #include <mutex>
 
 #include "./protocol.h"
+#include "./util.h"
 #include "./db.h"
 #include "./farm.h"
 #include "./thread_pool.h"
@@ -338,12 +339,7 @@ void handle_signup(int fd, std::string payload) {
     uint8_t nick_len = payload[0];
     std::string nick = payload.substr(1, nick_len);
 
-    int chars = 0;
-    for (unsigned char uc : nick) {
-        if ((uc & 0xC0) != 0x80) chars++;
-        // `client.cpp`에서 chat 처리할 때 내용 참고. 
-        // '한 글자'의 '첫 바이트' 개수를 세는 과정. '한 글자'의 '첫 바이트'만이 앞 2비트가 `10`이 아니다.
-    }
+    int chars = utf8_len(nick); // 한글 글자 수 세기 때문에 utf8_len 사용
     if (chars < 2 || chars > 15) {
         send_auth_result(fd, AUTH_BAD_FORMAT, 0); // 닉네임 길이: 2 ~ 15
         return;
@@ -353,11 +349,14 @@ void handle_signup(int fd, std::string payload) {
     uint8_t pw_len = payload[0];
     std::string pw = payload.substr(1, pw_len);
 
-    chars = 0;
-    for (unsigned char uc : pw) {
-        if ((uc & 0xC0) != 0x80) chars++;
+    for (unsigned char uc : pw) { // 한글 및 이상 문자 체크
+        if (uc < 32 || uc > 126) { // 공백(32) ~ '~'(126)만 허용 → 한글·제어문자 거부
+            send_auth_result(fd, AUTH_BAD_FORMAT, 0);
+            return;
+        }
     }
-    if (chars < 6 || chars > 15) {
+
+    if (pw.size() < 6 || pw.size() > 15) { // pw는 한글 허용하지 않기 때문에 바로 size()로 길이 체크
         send_auth_result(fd, AUTH_BAD_FORMAT, 0); // pw 길이: 6 ~ 15
         return;
     }

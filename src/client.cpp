@@ -15,7 +15,14 @@
 #include <sys/ioctl.h> // ioctl, FIONREAD
 
 #include "./protocol.h"
+#include "./util.h"
 #include "./farm.h"
+
+std::string signup_nick;
+std::string signup_pw;
+std::string signup_pw2;
+std::string signup_msg;
+int signup_field = 0; // 0: 닉네임, 1: 비밀번호, 2: 비밀번호 확인
 
 struct Client {
     int x;
@@ -37,6 +44,12 @@ int my_held[CROP_COUNT] = {0};
 
 std::string chat_buf; // 입력 중인 메시지
 std::vector<std::string> chat_log; // 최근 대화
+
+// 회원가입 창
+bool signup_open = true;
+
+// 로그인 창
+bool login_open = false;
 
 // 상점 창
 bool shop_open = false;
@@ -64,6 +77,35 @@ std::vector<int> others() {
 }
 
 int epfd = epoll_create1(0);
+
+// 회원가입 창
+void draw_signup() {
+    printf("=== 품앗이 가입 ===\n\n");
+
+    // 닉네임
+    printf("%s 닉네임: %s%s\n",
+            signup_field == 0 ? ">" : " ", // 지금 입력 중인 칸 표시
+            signup_nick.c_str(),
+            signup_field == 0 ? "_" : ""); // 커서
+
+    // 비밀번호 - 글자 수만큼 '*'
+    std::string masked(signup_pw.size(), '*');
+    printf("%s 비밀번호: %s%s\n",
+            signup_field == 1 ? ">" : " ",
+            masked.c_str(),
+            signup_field == 1 ? "_" : "");
+
+    // 비밀번호 확인 - 글자 수만큼 '*'
+    std::string masked2(signup_pw2.size(), '*');
+    printf("%s 비밀번호 확인: %s%s\n",
+            signup_field == 2 ? ">" : " ",
+            masked2.c_str(),
+            signup_field == 2 ? "_" : "");
+
+
+    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 가입 요청, Esc: 처음부터\n");
+    if (!signup_msg.empty()) printf("%s\n", signup_msg.c_str()); // 실패 이유 등
+}
 
 // 상점 창
 void draw_shop() {
@@ -98,7 +140,9 @@ void draw() {
     // 화면 지우고 커서 맨 위로
     printf("\033[2J\033[H"); // '\033': ESC, '[2J': 화면 클리어, '[H': 커서를 좌상단으로
 
-    if (shop_open) { // 상점 창
+    if (signup_open) { // 회원가입 창
+        draw_signup();
+    } else if (shop_open) { // 상점 창
         draw_shop();
     } else if (visit_open) { // 유저 리스트 창
         draw_visit();
@@ -290,7 +334,24 @@ int main() {
                     recv_buf.erase(0, 4 + length);
 
                     // 처리
-                    if (type == PKT_SNAPSHOT) {
+                    if (type == PKT_AUTH_RESULT) {
+                        int result = payload[0];
+                        if (result == AUTH_OK) {
+                            signup_open = false;
+                            signup_msg.clear();
+                            signup_nick.clear();
+                            signup_pw.clear();
+                            signup_pw2.clear();
+
+                            login_open = true;
+                        } else if (result == AUTH_BAD_FORMAT) {
+                            signup_msg = "닉네임 또는 비밀번호 형식이 잘못되었습니다.";
+                        } else if (result == AUTH_DUP_NICK) {
+                            signup_msg = "이미 존재하는 닉네임입니다.";
+                        } else if (result == AUTH_SERVER_ERROR) {
+                            signup_msg = "서버 오류가 발생했습니다.";
+                        }
+                    } else if (type == PKT_SNAPSHOT) {
                         // 모든 유저의 위치값 받기
                         clients.clear();
                         int client_cnt = get_u16(payload, 0);
@@ -376,6 +437,9 @@ int main() {
                         while (key_pending() && read(0, &c, 1) == 1) {
                             if (c >= '@' && c <= '~') break;
                         }
+                        // 가입 창에서 ↑(27 [ A) / ↓(27 [ B): 칸 이동
+                        if (signup_open && c == 'A') signup_field = (signup_field + 2) % 3;
+                        if (signup_open && c == 'B') signup_field = (signup_field + 1) % 3;
                     } else if (c == 'O') {
                         // '27 O 글자'의 형태 - F1 ~ F4 - c 하나 더 받아서 무시해주면 됨
                         if (key_pending()) { r = read(0, &c, 1); }
@@ -384,7 +448,52 @@ int main() {
                     continue; // 이 키에 대한 처리를 여기서 끝냄(for 다음(다음 입력)으로 넘어감)
                 }
 
-                if (chat_open) {
+                if (signup_open) {
+                    if (key == '\n' || key == '\r') { // Enter: 가입 요청
+                        if (signup_nick.empty() || signup_pw.empty() || signup_pw2.empty()) {
+                            signup_msg.clear();
+                            signup_msg = "모든 칸을 입력해주세요.";
+                        } else if (!signup_nick.empty() && (utf8_len(signup_nick) < 2 || utf8_len(signup_nick) > 15)) {
+                            signup_msg.clear();
+                            signup_msg = "닉네임은 2~15자 사이로 입력해주세요.";
+                        } else if (!signup_pw.empty() && (signup_pw.size() < 6 || signup_pw.size() > 15)) {
+                            signup_msg.clear();
+                            signup_msg = "비밀번호는 6~15자 사이로 입력해주세요.";
+                        } else if (!signup_pw.empty() && !signup_pw2.empty() && (signup_pw != signup_pw2)) {
+                            signup_msg.clear();
+                            signup_msg = "비밀번호가 일치하지 않습니다.";
+                        } else {
+                            std::string payload;
+                            payload += (char)signup_nick.size();
+                            payload += signup_nick;
+                            payload += (char)signup_pw.size();
+                            payload += signup_pw;
+                            std::string pkt = make_packet(PKT_SIGNUP, payload);
+                            
+                            ssize_t w = write(sock, pkt.data(), pkt.size());
+                            (void) w;
+                        }
+                    } else if (key == 27) { // Esc: 처음부터
+                        signup_nick.clear();
+                        signup_pw.clear();
+                        signup_pw2.clear();
+                        signup_msg.clear();
+                        signup_field = 0;
+                    } else if (key == 127 || key == 8) { // Backspace: 한 글자 지우기
+                        if (signup_field == 0 && !signup_nick.empty()) {
+                            while (!signup_nick.empty() && ((unsigned char)signup_nick.back() & 0xC0) == 0x80)
+                                signup_nick.pop_back(); // 뒤에서부터, 앞 2비트가 `10`인 바이트 지우기
+                            if (!signup_nick.empty()) signup_nick.pop_back(); // 마지막 남은 바이트 지우기
+                        }
+                        else if (signup_field == 1 && !signup_pw.empty()) signup_pw.pop_back();
+                        else if (signup_field == 2 && !signup_pw2.empty()) signup_pw2.pop_back();
+                    } else {
+                        unsigned char uc = (unsigned char)key; // 한글은 음수로 들어오기 때문에 unsigned char로 캐스팅해서 처리
+                        if (signup_field == 0 && uc >= 32) signup_nick += key;
+                        else if (signup_field == 1 && isprint(uc)) signup_pw += key; // 한글은 128~255, isprint는 32~126만 참
+                        else if (signup_field == 2 && isprint(uc)) signup_pw2 += key;
+                    }
+                } else if (chat_open) {
                     if (key == '\n' || key == '\r') { // Enter: 보내고 닫기
                         if (!chat_buf.empty()) {
                             std::string pkt = make_packet(PKT_CHAT, chat_buf);
