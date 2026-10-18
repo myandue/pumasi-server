@@ -18,3 +18,4 @@ void drain_db_results(); // db_event_fd가 울렸을 때 메인 루프에서 호
 void post_to_main(std::function<void()> fn);
 bool db_connect();
 uint8_t signup_db(const std::string& nick, const std::string& pw, uint32_t& out_id); // 반환값이 reason이기 때문에 또 다른 반환값인 생성 id는 매개변수로.
+uint8_t login_db(const std::string& nick, const std::string& pw, uint32_t& out_id);

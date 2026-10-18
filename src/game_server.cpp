@@ -373,6 +373,28 @@ void handle_signup(int fd, std::string payload) {
     });
 }
 
+void handle_login(int fd, std::string payload) {
+    if (payload.empty()) return;
+
+    uint8_t nick_len = payload[0];
+    std::string nick = payload.substr(1, nick_len);
+    payload.erase(0, 1 + nick_len);
+
+    uint8_t pw_len = payload[0];
+    std::string pw = payload.substr(1, pw_len);
+    payload.erase(0, 1 + pw_len);
+
+    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+        uint32_t id = 0;
+        uint8_t reason = login_db(nick, pw, id);
+
+        post_to_main([fd, reason, id] {
+            if (!clients.count(fd)) return;
+            send_auth_result(fd, reason, id);
+        });
+    });
+}
+
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
@@ -412,6 +434,8 @@ void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload)
             handle_chat(fd, c, payload); break;
         case PKT_SIGNUP:
             handle_signup(fd, payload); break;
+        case PKT_LOGIN:
+            handle_login(fd, payload); break;
         default:
             break; // 모르는 type, 서버 -> 클라 전용 type: 무시
     }

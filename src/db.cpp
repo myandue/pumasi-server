@@ -138,3 +138,66 @@ uint8_t signup_db(const std::string& nick, const std::string& pw, uint32_t& out_
     out_id = id;
     return AUTH_OK;
 }
+
+uint8_t login_db(const std::string& nick, const std::string& pw, uint32_t& out_id) {
+    // 1) users SELECT: 사용자 입력(nick)이 들어가므로 prepared statement
+    MYSQL_STMT* stmt = mysql_stmt_init(db);
+    const char* sql = "SELECT id, password_hash FROM users WHERE nickname = ?";
+
+    MYSQL_BIND b[1];
+    memset(b, 0, sizeof(b));
+
+    b[0].buffer_type = MYSQL_TYPE_STRING;
+    b[0].buffer = const_cast<char*>(nick.data());
+    b[0].buffer_length = nick.size();
+
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql))
+        || mysql_stmt_bind_named_param(stmt, b, 1, nullptr)
+        || mysql_stmt_execute(stmt)) {
+        
+        mysql_stmt_close(stmt);
+        return AUTH_SERVER_ERROR;
+    }
+
+    // 결과 바인딩
+    uint32_t id;
+    char hash[crypto_pwhash_STRBYTES];
+    unsigned long hash_len;
+    
+    MYSQL_BIND r[2];
+    memset(r, 0, sizeof(r));
+
+    r[0].buffer_type = MYSQL_TYPE_LONG;
+    r[0].buffer = &id;
+    r[0].is_unsigned = true;
+
+    r[1].buffer_type = MYSQL_TYPE_STRING;
+    r[1].buffer = hash;
+    r[1].buffer_length = sizeof(hash);
+    r[1].length = &hash_len;
+
+    if (mysql_stmt_bind_result(stmt, r) || mysql_stmt_store_result(stmt)) {
+        mysql_stmt_close(stmt);
+        return AUTH_SERVER_ERROR;
+    }
+
+    int result = mysql_stmt_fetch(stmt); // SELECT 결과를 가져옴
+    if (result == MYSQL_NO_DATA) { // 결과 0행 = 존재하지 않는 닉네임
+        mysql_stmt_close(stmt);
+        return AUTH_WRONG;
+    }
+    if (result != 0) { // 1 = 에러, MYSQL_DATA_TRUNCATED = 버퍼보다 긴 값
+        mysql_stmt_close(stmt);
+        return AUTH_SERVER_ERROR;
+    }
+
+    // 비밀번호 검증
+    if (crypto_pwhash_str_verify(hash, pw.data(), pw.size()) != 0) {
+        mysql_stmt_close(stmt);
+        return AUTH_WRONG;
+    }
+
+    out_id = id;
+    mysql_stmt_close(stmt);
+    return AUTH_OK;
+}
