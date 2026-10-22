@@ -16,7 +16,6 @@ enum PacketType : uint16_t {
     PKT_TICK = 1, // (미사용) 서버 -> 클라: 지금 몇 tick 째인지
     PKT_MOVE = 2, // 클라 -> 서버: [dx:1][dy:1]. client의 이동 (-1~1)
     PKT_SNAPSHOT = 3, // 서버 -> 클라: [count:2] + count*[id:4][x:4][y:4]. 같은 방 사람들 위치, 매 tick 그 방 사람에게
-    PKT_WELCOME = 4, // 서버 -> 클라: [id:4]. 내 id(fd). 접속 직후 1회.
 
     PKT_TILL = 10, // 클라 -> 서버: [x:1][y:1]
     PKT_PLANT = 11, // 클라 -> 서버: [x:1][y:1][crop:1]

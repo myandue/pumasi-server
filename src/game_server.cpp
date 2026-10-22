@@ -31,6 +31,8 @@ bool server_running = true;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
+    uint32_t user_id = 0; // 0이면 로그인 전임을 의미 
+
     std::string send_buf;
     std::string recv_buf;
     
@@ -58,15 +60,6 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
-
-// 클라한테 해당 클라의 id(fd) 전송
-void send_welcome(int fd) {
-    std::string payload;
-    put_u32(payload, fd);
-    std::string pkt = make_packet(PKT_WELCOME, payload);
-    ssize_t w = write(fd, pkt.data(), pkt.size());
-    (void) w;
-}
 
 // 접속 중인 사람 목록을 전원에게
 void broadcast_player_list() {
@@ -421,24 +414,29 @@ void on_tick() {
 }
 
 void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload) {
-    switch (type) {
-        case PKT_MOVE:
-            handle_move(c, payload); break;
-        case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
-            handle_farm_action(fd, c, type, payload); break;
-        case PKT_BUY: case PKT_SELL:
-            handle_wallet(fd, c, type, payload); break;
-        case PKT_VISIT:
-            handle_visit(fd, c, payload); break;
-        case PKT_CHAT:
-            handle_chat(fd, c, payload); break;
-        case PKT_SIGNUP:
-            handle_signup(fd, payload); break;
-        case PKT_LOGIN:
-            handle_login(fd, payload); break;
-        default:
-            break; // 모르는 type, 서버 -> 클라 전용 type: 무시
+    if (c.user_id == 0) {
+        if (type == PKT_SIGNUP) {
+            handle_signup(fd, payload);
+        } else if (type == PKT_LOGIN) {
+            handle_login(fd, payload);
+        }
+    } else {
+        switch (type) {
+            case PKT_MOVE:
+                handle_move(c, payload); break;
+            case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
+                handle_farm_action(fd, c, type, payload); break;
+            case PKT_BUY: case PKT_SELL:
+                handle_wallet(fd, c, type, payload); break;
+            case PKT_VISIT:
+                handle_visit(fd, c, payload); break;
+            case PKT_CHAT:
+                handle_chat(fd, c, payload); break;
+            default:
+                break; // 모르는 type, 서버 -> 클라 전용 type: 무시
+        }
     }
+
 }
 
 int main() {
@@ -548,13 +546,6 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
-                    clients[client_fd].current_farm = client_fd; // 자기 농장에 입장
-                    farms[client_fd] = Farm{};
-
-                    send_welcome(client_fd);
-                    send_farm_snapshot(client_fd, client_fd); // (받는 사람, 어느 농장)
-                    send_wallet(client_fd, clients[client_fd]);
-                    broadcast_player_list();
 
                     continue;
                 } else {
