@@ -201,3 +201,48 @@ uint8_t login_db(const std::string& nick, const std::string& pw, uint32_t& out_i
     mysql_stmt_close(stmt);
     return AUTH_OK;
 }
+
+bool load_user_db(uint32_t user_id, UserData& out) {
+    std::string coin = "SELECT coin FROM users WHERE id = " + std::to_string(user_id);
+    if (mysql_query(db, coin.c_str())) return false;
+    MYSQL_RES* res = mysql_store_result(db);
+    if (!res) return false;
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (!row) {
+        mysql_free_result(res);
+        return false;
+    }
+    out.coin = atoi(row[0]);
+    mysql_free_result(res); // store_result로 받은 메모리 해제
+
+    std::string inv = "SELECT crop, seeds, held FROM inventory WHERE user_id = " + std::to_string(user_id);
+    if (mysql_query(db, inv.c_str())) return false;
+    res = mysql_store_result(db);
+    if (!res) return false;
+    while ((row = mysql_fetch_row(res))) {
+        int crop = atoi(row[0]);
+        if (crop < 1 || crop >= CROP_COUNT) continue; // 배열 밖이면 버림 
+        out.seeds[crop] = atoi(row[1]);
+        out.held[crop] = atoi(row[2]);
+    }
+    mysql_free_result(res);
+
+    std::string tiles = "SELECT x, y, state, crop, stage, watered_at FROM farm_tiles WHERE user_id = " + std::to_string(user_id);
+    if (mysql_query(db, tiles.c_str())) return false;
+    res = mysql_store_result(db);
+    if (!res) return false;
+    while ((row = mysql_fetch_row(res))) {
+        int x = atoi(row[0]);
+        int y = atoi(row[1]);
+        if (x < 0 || x >= FIELD_SIZE || y < 0 || y >= FIELD_SIZE) continue;
+        out.farm.tiles[y][x].state = atoi(row[2]);
+        out.farm.tiles[y][x].crop = atoi(row[3]);
+        out.farm.tiles[y][x].stage = atoi(row[4]);
+        out.farm.tiles[y][x].watered_at = strtoull(row[5], nullptr, 10);
+        // endptr: 변환이 멈춘 위치를 돌려받는 포인터(숫자 뒤에 쓰레기가 붙었는지 체크) -> 여기서는 필요 없어서 nullptr
+        // base: 진법. 10이면 10진수.
+    }
+    mysql_free_result(res);
+
+    return true;
+}

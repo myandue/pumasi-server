@@ -9,6 +9,8 @@
 #include <sys/timerfd.h> //timerfd
 #include <cstdint> // uint64_t
 #include <cstdlib>
+#include <algorithm>
+#include <iterator>
 
 #include <fcntl.h> // fcntl, O_NONBLOCK
 #include <cerrno> // errno, EAGAIN
@@ -31,7 +33,8 @@ bool server_running = true;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
-    uint32_t user_id = 0; // 0이면 로그인 전임을 의미 
+    uint32_t user_id = 0; // 0이면 로그인 전임을 의미
+    bool logging_in = false; // 로그인 중 표기 
 
     std::string send_buf;
     std::string recv_buf;
@@ -50,7 +53,6 @@ struct Client {
 };
 std::unordered_map<int, Client> clients;
 
-struct Farm { Tile tiles[FIELD_SIZE][FIELD_SIZE]; };
 std::unordered_map<int, Farm> farms; // 키 = 주인id(fd)
 
 int epfd = epoll_create1(0); // 장부 개설
@@ -369,6 +371,12 @@ void handle_signup(int fd, std::string payload) {
 void handle_login(int fd, std::string payload) {
     if (payload.empty()) return;
 
+    if (!clients.count(fd)) return;
+    Client& c = clients[fd];
+
+    if (c.logging_in) return;
+    else c.logging_in = true;
+
     uint8_t nick_len = payload[0];
     std::string nick = payload.substr(1, nick_len);
     payload.erase(0, 1 + nick_len);
@@ -381,9 +389,33 @@ void handle_login(int fd, std::string payload) {
         uint32_t id = 0;
         uint8_t reason = login_db(nick, pw, id);
 
-        post_to_main([fd, reason, id] {
+        UserData user_data = {};
+        if (reason == AUTH_OK) {
+            bool load = load_user_db(id, user_data);
+            if (!load) reason = AUTH_SERVER_ERROR;
+        }
+
+        post_to_main([fd, reason, id, user_data] {
             if (!clients.count(fd)) return;
+            Client& c = clients[fd];
+
             send_auth_result(fd, reason, id);
+            c.logging_in = false;
+
+            if (reason == AUTH_OK) {
+                c.user_id = id;
+                c.coin = user_data.coin;
+                std::copy(std::begin(user_data.seeds), std::end(user_data.seeds), c.seeds);
+                std::copy(std::begin(user_data.held), std::end(user_data.held), c.held);
+                c.current_farm = id;
+
+                farms[id] = user_data.farm;
+
+                // 농장 입장 후 처리 (연결 클라이언트에게 정보 전송)
+                send_farm_snapshot(fd, id);
+                send_wallet(fd, c);
+                broadcast_player_list();
+            }
         });
     });
 }
