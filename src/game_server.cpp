@@ -49,11 +49,11 @@ struct Client {
     int held[CROP_COUNT] = {0};
 
     // 지금 보고 있는 농장의 주인 id
-    int current_farm = -1;
+    uint32_t current_farm = 0;
 };
-std::unordered_map<int, Client> clients;
+std::unordered_map<int, Client> clients; // 키 = fd
 
-std::unordered_map<int, Farm> farms; // 키 = 주인id(fd)
+std::unordered_map<uint32_t, Farm> farms; // 키 = 주인id(user_id)
 
 int epfd = epoll_create1(0); // 장부 개설
 
@@ -65,19 +65,30 @@ void set_nonblocking(int fd) {
 
 // 접속 중인 사람 목록을 전원에게
 void broadcast_player_list() {
+    std::string payload_tmp;
+    int cnt = 0;
+    for (auto& [cfd, c]: clients) {
+        if (c.user_id != 0) { // 로그인 완료한 플레이어 목록
+            put_u32(payload_tmp, c.user_id);
+            cnt++;
+        }
+    }
     std::string payload;
-    put_u16(payload, clients.size());
-    for (auto& [cfd, c]: clients) put_u32(payload, cfd);
+    put_u16(payload, cnt);
+    payload += payload_tmp;
     
     std::string pkt = make_packet(PKT_PLAYER_LIST, payload);
     for (auto& [cfd, c]: clients) {
-        ssize_t w = write(cfd, pkt.data(), pkt.size());
-        (void) w;
+        if (c.user_id != 0) { // 로그인 완료한 플레이어에게만 플레이어 목록 전송
+            ssize_t w = write(cfd, pkt.data(), pkt.size());
+            (void) w;
+        }
+
     }
 }
 
 // 농장 입장할 때 마다: 입장한 농장 + 서버 현재 시각 + 밭 전체 스냅샷
-void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 농장의 owner
+void send_farm_snapshot(int fd, uint32_t farm_owner_id) { // farm_owner_id: 현재 농장의 owner
     std::string payload;
 
     // 0) owner_id
@@ -109,7 +120,7 @@ void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 �
 }
 
 // 칸 하나의 현재 값을 담은 TILE_UPDATE 패킷을 만든다
-std::string make_tile_update(int farm_owner_id, uint8_t x, uint8_t y) {
+std::string make_tile_update(uint32_t farm_owner_id, uint8_t x, uint8_t y) {
     std::string payload;
     Tile tile = farms[farm_owner_id].tiles[y-FIELD_Y0][x-FIELD_X0];
 
@@ -124,7 +135,7 @@ std::string make_tile_update(int farm_owner_id, uint8_t x, uint8_t y) {
 }
 
 // 그 방(농장)에 있는 사람 전원에게 pkt 전송
-void send_to_room(int farm_owner_id, const std::string& pkt) {
+void send_to_room(uint32_t farm_owner_id, const std::string& pkt) {
     for (auto& [cfd, c]: clients) {
         if (c.current_farm != farm_owner_id) continue;
         ssize_t w = write(cfd, pkt.data(), pkt.size());
@@ -133,7 +144,7 @@ void send_to_room(int farm_owner_id, const std::string& pkt) {
 }
 
 // 땅 업데이트 시 요청자 한 명에게만 전송
-void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
+void send_tile_update(int fd, uint32_t farm_owner_id, uint8_t x, uint8_t y) {
     std::string pkt = make_tile_update(farm_owner_id, x, y);
     ssize_t w = write(fd, pkt.data(), pkt.size());
     (void) w;
@@ -167,7 +178,7 @@ void send_auth_result(int fd, uint8_t reason, uint32_t account_id) {
 // 방문 처리
 void handle_visit(int fd, Client& c, const std::string& payload) {
     if (payload.size() != 4) return;
-    int owner = (int)get_u32(payload, 0);
+    uint32_t owner = get_u32(payload, 0);
     if (!farms.count(owner)) return; // 없는 농장이면 무시
     if (owner == c.current_farm) return; // 이미 그 방이면 무시
 
@@ -183,7 +194,7 @@ void handle_chat(int fd, Client& c, const std::string& payload) {
         if (ch < 0x20 || ch == 0x7f) return; // 제어문자가 섞이면 무시
 
     std::string out;
-    put_u32(out, fd); // 보낸 사람
+    put_u32(out, c.user_id); // 보낸 사람
     out += payload;
     send_to_room(c.current_farm, make_packet(PKT_CHAT_MSG, out)); // 같은 방 전원 (보낸 사람 포함)
 
@@ -241,7 +252,7 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     }
 
     // '수확'의 경우, 수행 유저와 농장주가 다르다면 거부
-    if (type == PKT_HARVEST && fd != c.current_farm) {
+    if (type == PKT_HARVEST && c.user_id != c.current_farm) {
         send_tile_update(fd, c.current_farm, x, y);
         return;
     }
@@ -271,7 +282,7 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
         }
         case PKT_WATER:
             ok = water(t, now); 
-            if (ok && c.current_farm != fd) { // 남의 농장에 물 줌 = 방문자 보상
+            if (ok && c.current_farm != c.user_id) { // 남의 농장에 물 줌 = 방문자 보상
                 c.coin += 2;
                 send_wallet(fd, c);
             }            
@@ -429,7 +440,7 @@ void on_tick() {
         uint16_t client_cnt = 0;
         for (auto& [cfd, c]: clients) {
             if (c.current_farm != owner) continue;
-            put_u32(body, cfd);
+            put_u32(body, c.user_id);
             put_u32(body, c.x);
             put_u32(body, c.y);
             client_cnt ++;
@@ -633,16 +644,18 @@ int main() {
                     
                     if (closed) {
                         if (clients.count(fd)) {
+                            uint32_t closing_id = clients[fd].user_id;
+
                             // 이 사람의 농장에 와 있던 방문자들 각자 자기 농장으로
                             for (auto& [cfd, c]: clients) {
-                                if (cfd == fd || c.current_farm != fd) continue;
-                                c.current_farm = cfd; // 본인 농장
+                                if (closing_id == 0 || cfd == fd || c.current_farm != closing_id) continue;
+                                c.current_farm = c.user_id; // 본인 농장
                                 c.x = 0; c.y = 0; // 입장 시 위치 초기화
-                                send_farm_snapshot(cfd, cfd);
+                                send_farm_snapshot(cfd, c.user_id);
                             }
                             clients.erase(fd);
-                            if (farms.count(fd)) {
-                                farms.erase(fd);
+                            if (farms.count(closing_id)) {
+                                farms.erase(closing_id);
                             }
                             broadcast_player_list();
                         }
