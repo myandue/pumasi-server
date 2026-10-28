@@ -338,6 +338,9 @@ int main() {
 
     // 받기 루프 
     while (true) {
+        // 초기화
+        draw();
+
         int n = epoll_wait(epfd, events, 2, -1);
         if (n < 0) { perror("epoll_wait"); break; }
 
