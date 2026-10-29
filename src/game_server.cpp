@@ -347,6 +347,7 @@ void handle_signup(int fd, std::string payload) {
     if (payload.empty()) return;
     
     uint8_t nick_len = payload[0];
+    if (payload.size() < ((size_t)1 + nick_len)) return;
     std::string nick = payload.substr(1, nick_len);
 
     int chars = utf8_len(nick); // 한글 글자 수 세기 때문에 utf8_len 사용
@@ -357,6 +358,7 @@ void handle_signup(int fd, std::string payload) {
     payload.erase(0, 1 + nick_len);
 
     uint8_t pw_len = payload[0];
+    if (payload.size() < ((size_t)1 + pw_len)) return;
     std::string pw = payload.substr(1, pw_len);
 
     for (unsigned char uc : pw) { // 한글 및 이상 문자 체크
@@ -389,16 +391,18 @@ void handle_login(int fd, std::string payload) {
     if (!clients.count(fd)) return;
     Client& c = clients[fd];
 
-    if (c.logging_in) return;
-    else c.logging_in = true;
-
     uint8_t nick_len = payload[0];
+    if (payload.size() < ((size_t)1 + nick_len)) return;
     std::string nick = payload.substr(1, nick_len);
     payload.erase(0, 1 + nick_len);
 
     uint8_t pw_len = payload[0];
+    if (payload.size() < ((size_t)1 + pw_len)) return;
     std::string pw = payload.substr(1, pw_len);
     payload.erase(0, 1 + pw_len);
+
+    if (c.logging_in) return;
+    else c.logging_in = true;
 
     db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
         uint32_t id = 0;

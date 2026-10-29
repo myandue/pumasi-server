@@ -367,9 +367,12 @@ int main() {
                     std::string payload = recv_buf.substr(4, length);
                     recv_buf.erase(0, 4 + length);
 
+                    // 로그인 전에는 PKT_AUTH_RESULT 외에는 무시
+                    if (my_id == 0 && type != PKT_AUTH_RESULT) continue;
+
                     // 처리
                     if (type == PKT_AUTH_RESULT) {
-                        int result = payload[0];
+                        int result = (uint8_t)payload[0];
                         if (result == AUTH_OK) {
                             if (signup_open && !login_open) {
                                 signup_open = false;
@@ -418,27 +421,27 @@ int main() {
                             for (int j = 0 ; j < FIELD_SIZE ; j++) {
                                 int offset = 12 + (i*FIELD_SIZE + j)*11;
 
-                                farm[i][j].state = payload[offset];
-                                farm[i][j].crop = payload[offset+1];
-                                farm[i][j].stage = payload[offset+2];
+                                farm[i][j].state = (uint8_t)payload[offset];
+                                farm[i][j].crop = (uint8_t)payload[offset+1];
+                                farm[i][j].stage = (uint8_t)payload[offset+2];
                                 farm[i][j].watered_at = get_u64(payload, offset+3);
                             }
                         }
                     } else if (type == PKT_TILE_UPDATE) {
-                        int x = payload[0];
-                        int y = payload[1];
+                        int x = (uint8_t)payload[0];
+                        int y = (uint8_t)payload[1];
 
-                        farm[y-FIELD_Y0][x-FIELD_X0].state = payload[2];
-                        farm[y-FIELD_Y0][x-FIELD_X0].crop = payload[3];
-                        farm[y-FIELD_Y0][x-FIELD_X0].stage = payload[4];
+                        farm[y-FIELD_Y0][x-FIELD_X0].state = (uint8_t)payload[2];
+                        farm[y-FIELD_Y0][x-FIELD_X0].crop = (uint8_t)payload[3];
+                        farm[y-FIELD_Y0][x-FIELD_X0].stage = (uint8_t)payload[4];
                         farm[y-FIELD_Y0][x-FIELD_X0].watered_at = get_u64(payload, 5);
                     } else if (type == PKT_WALLET) {
                         my_coin = get_u32(payload, 0);
 
                         int offset = 4;
                         for (int i = 1 ; i < CROP_COUNT ; i++) {
-                            my_seeds[i] = payload[offset];
-                            my_held[i] = payload[offset+1];
+                            my_seeds[i] = (uint8_t)payload[offset];
+                            my_held[i] = (uint8_t)payload[offset+1];
                             offset += 2;
                         }
                     } else if (type == PKT_PLAYER_LIST) {
