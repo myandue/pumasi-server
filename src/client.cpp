@@ -51,10 +51,10 @@ std::string chat_buf; // 입력 중인 메시지
 std::vector<std::string> chat_log; // 최근 대화
 
 // 회원가입 창
-bool signup_open = true;
+bool signup_open = false;
 
 // 로그인 창
-bool login_open = false;
+bool login_open = true;
 
 // 상점 창
 bool shop_open = false;
@@ -111,7 +111,7 @@ void draw_signup() {
             signup_field == 2 ? "_" : "");
 
 
-    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 가입 요청, Esc: 처음부터\n");
+    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 가입 요청, Esc: 처음부터, Tab: 로그인 창으로 이동\n");
     if (!signup_msg.empty()) printf("%s\n", signup_msg.c_str()); // 실패 이유 등
 }
 
@@ -132,7 +132,7 @@ void draw_login() {
             masked.c_str(),
             login_field == 1 ? "_" : "");
 
-    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 로그인 요청, Esc: 처음부터\n");
+    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 로그인 요청, Esc: 처음부터, Tab: 회원가입 창으로 이동\n");
     if (!login_msg.empty()) printf("%s\n", login_msg.c_str()); // 실패 이유 등
 }
 
@@ -505,6 +505,16 @@ int main() {
                 }
 
                 if (signup_open) {
+                    if (key == 9) { // Tab: 로그인 창으로 이동
+                        signup_nick.clear();
+                        signup_pw.clear();
+                        signup_pw2.clear();
+                        signup_msg.clear();
+                        signup_field = 0;
+
+                        signup_open = false;
+                        login_open = true;
+                    }
                     if (key == '\n' || key == '\r') { // Enter: 가입 요청
                         if (signup_nick.empty() || signup_pw.empty() || signup_pw2.empty()) {
                             signup_msg.clear();
@@ -550,6 +560,15 @@ int main() {
                         else if (signup_field == 2 && isprint(uc)) signup_pw2 += key;
                     }
                 } else if (login_open) {
+                    if (key == 9) { // Tab: 회원가입 창으로 이동
+                        login_nick.clear();
+                        login_pw.clear();
+                        login_msg.clear();
+                        login_field = 0;
+
+                        signup_open = true;
+                        login_open = false;
+                    }
                     if (key == '\n' || key == '\r') { // Enter: 로그인 요청
                         if (login_nick.empty() || login_pw.empty()) {
                             login_msg.clear();
