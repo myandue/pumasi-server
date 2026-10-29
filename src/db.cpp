@@ -203,16 +203,20 @@ uint8_t login_db(const std::string& nick, const std::string& pw, uint32_t& out_i
 }
 
 bool load_user_db(uint32_t user_id, UserData& out) {
-    std::string coin = "SELECT coin FROM users WHERE id = " + std::to_string(user_id);
-    if (mysql_query(db, coin.c_str())) return false;
-    MYSQL_RES* res = mysql_store_result(db);
+    MYSQL_RES* res;
+    MYSQL_ROW row;
+
+    std::string user = "SELECT nickname,coin FROM users WHERE id = " + std::to_string(user_id);
+    if (mysql_query(db, user.c_str())) return false;
+    res = mysql_store_result(db);
     if (!res) return false;
-    MYSQL_ROW row = mysql_fetch_row(res);
+    row = mysql_fetch_row(res);
     if (!row) {
         mysql_free_result(res);
         return false;
     }
-    out.coin = atoi(row[0]);
+    out.nick = row[0];
+    out.coin = atoi(row[1]);
     mysql_free_result(res); // store_result로 받은 메모리 해제
 
     std::string inv = "SELECT crop, seeds, held FROM inventory WHERE user_id = " + std::to_string(user_id);

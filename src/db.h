@@ -8,6 +8,7 @@
 #include "./farm.h"
 
 struct UserData {
+    std::string nick;
     int coin = 0;
     int seeds[CROP_COUNT] = {0};
     int held[CROP_COUNT] = {0};

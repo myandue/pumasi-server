@@ -15,7 +15,7 @@ const size_t CHAT_MAX = 200; // 메시지 최대 바이트
 enum PacketType : uint16_t {
     PKT_TICK = 1, // (미사용) 서버 -> 클라: 지금 몇 tick 째인지
     PKT_MOVE = 2, // 클라 -> 서버: [dx:1][dy:1]. client의 이동 (-1~1)
-    PKT_SNAPSHOT = 3, // 서버 -> 클라: [count:2] + count*[id:4][x:4][y:4]. 같은 방 사람들 위치, 매 tick 그 방 사람에게
+    PKT_SNAPSHOT = 3, // 서버 -> 클라: [count:2] + count*[id:4][x:1][y:1]. 같은 방 사람들 위치, 매 tick 그 방 사람에게
 
     PKT_TILL = 10, // 클라 -> 서버: [x:1][y:1]
     PKT_PLANT = 11, // 클라 -> 서버: [x:1][y:1][crop:1]
@@ -33,7 +33,7 @@ enum PacketType : uint16_t {
     PKT_VISIT = 50, // 클라 -> 서버: [farm_owner_id:4]. 그 농장 방으로 이동. 내 농장으로 = 내 id.
     PKT_CHAT = 51, // 클라 -> 서버: 메시지 바이트(UTF-8). 길이는 프레임 헤더에.
 
-    PKT_PLAYER_LIST = 60, // 서버 -> 클라: [count:2] + count*[id:4] 접속 중인 사람 목록. 접속·퇴장 시 전원에게.
+    PKT_PLAYER_LIST = 60, // 서버 -> 클라: [count:2] + count*[id:4][nick_len:1][nick] 접속 중인 사람 목록. 접속·퇴장 시 전원에게.
     PKT_CHAT_MSG = 61, // 서버 -> 클라: [sender_id:4] + 메시지 바이트. 같은 방 전원에게.
 
     PKT_SIGNUP = 70, // 클라 -> 서버: [nick_len:1][nick][pw_len:1][pw]

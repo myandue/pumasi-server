@@ -33,8 +33,10 @@ bool server_running = true;
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
-    uint32_t user_id = 0; // 0이면 로그인 전임을 의미
     bool logging_in = false; // 로그인 중 표기 
+
+    uint32_t user_id = 0; // 0이면 로그인 전임을 의미
+    std::string nick;
 
     std::string send_buf;
     std::string recv_buf;
@@ -70,6 +72,8 @@ void broadcast_player_list() {
     for (auto& [cfd, c]: clients) {
         if (c.user_id != 0) { // 로그인 완료한 플레이어 목록
             put_u32(payload_tmp, c.user_id);
+            payload_tmp += (char)c.nick.size();
+            payload_tmp += c.nick;
             cnt++;
         }
     }
@@ -415,6 +419,7 @@ void handle_login(int fd, std::string payload) {
 
             if (reason == AUTH_OK) {
                 c.user_id = id;
+                c.nick = user_data.nick;
                 c.coin = user_data.coin;
                 std::copy(std::begin(user_data.seeds), std::end(user_data.seeds), c.seeds);
                 std::copy(std::begin(user_data.held), std::end(user_data.held), c.held);
@@ -441,8 +446,8 @@ void on_tick() {
         for (auto& [cfd, c]: clients) {
             if (c.current_farm != owner) continue;
             put_u32(body, c.user_id);
-            put_u32(body, c.x);
-            put_u32(body, c.y);
+            body.push_back(c.x);
+            body.push_back(c.y);
             client_cnt ++;
         }
         if (client_cnt == 0) continue; // 아무도 없는 방은 건너뜀

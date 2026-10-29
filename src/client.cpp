@@ -33,10 +33,10 @@ struct Client {
     int x;
     int y;
 };
-std::unordered_map<int, Client> clients; // 현재 같은 방에 존재하는 client들 
+std::unordered_map<uint32_t, Client> clients; // 현재 같은 방에 존재하는 client들 / key: user_id 
 
 Tile farm[FIELD_SIZE][FIELD_SIZE];
-int my_id = -1;
+uint32_t my_id = 0;
 
 int64_t server_offset = 0; // 서버와의 시간차
 
@@ -69,16 +69,19 @@ bool chat_open = false;
 bool chat_drop = false;
 
 // 현재 농장 주인
-int farm_owner = -1;
+uint32_t farm_owner = 0;
 
 // 전체 유저 목록
-std::vector<int> players;
+struct Player {
+    std::string nick;
+};
+std::unordered_map<uint32_t, Player> players;
 
 // 나를 뺀 접속자 목록 (화면과 키 처리가 같은 순서를 써야 함)
-std::vector<int> others() {
-    std::vector<int> v;
-    for (int id : players) if (id != my_id) v.push_back(id);
-    return v;
+std::vector<uint32_t> others() {
+    std::vector<uint32_t> o;
+    for (const auto& [id, player] : players) if (id != my_id) o.push_back(id);
+    return o;
 }
 
 int epfd = epoll_create1(0);
@@ -153,9 +156,9 @@ void draw_shop() {
 // 유저 선택(방문 목적) 창
 void draw_visit() {
     printf("=== 방문 ===\n");
-    std::vector<int> o = others();
+    std::vector<uint32_t> o = others();
     if (o.empty()) printf("(방문할 사람 없음)\n");
-    for (size_t i = 0 ; i < o.size() ; i++) printf("%zu. %d번 농장\n", i + 1, o[i]);
+    for (size_t i = 0 ; i < o.size() ; i++) printf("%zu. %s 네 농장\n", i + 1, players[o[i]].nick.c_str());
     printf("\n번호: 방문 | h: 내 농장으로 | v/q: 닫기\n");
 }
 
@@ -268,7 +271,7 @@ void send_action(int sock, char key) {
 }
 
 // 다른 사람 농장 방문
-void send_visit(int sock, int owner) {
+void send_visit(int sock, uint32_t owner) {
     std::string payload;
     put_u32(payload, owner);
     std::string pkt = make_packet(PKT_VISIT, payload);
@@ -400,10 +403,10 @@ int main() {
                         int client_cnt = get_u16(payload, 0);
 
                         for (int i = 0 ; i < client_cnt ; i++) {
-                            int j = 3*i;
-                            int id = get_u32(payload, 4*j + 2);
-                            int x = get_u32(payload, 4*(j+1) + 2);
-                            int y = get_u32(payload, 4*(j+2) + 2);
+                            int off = 2 + 6*i;
+                            uint32_t id = get_u32(payload, off);
+                            int x = (uint8_t)payload[off + 4];
+                            int y = (uint8_t)payload[off + 5];
 
                             clients[id] = Client{.x = x, .y = y};
                         }
@@ -442,13 +445,23 @@ int main() {
                         players.clear();
                         int player_cnt = get_u16(payload, 0);
 
+                        int offset = 2;
                         for (int i = 0 ; i < player_cnt ; i++) {
-                            players.push_back(get_u32(payload, i*4 + 2));
+                            uint32_t id = get_u32(payload, offset);
+                            int nick_len = (uint8_t)payload[offset + 4];
+                            std::string nick = payload.substr(offset + 5, nick_len);
+                            players[id] = Player{.nick = nick};
+
+                            offset += (4 + 1 + nick_len);
                         }
                     } else if (type == PKT_CHAT_MSG) {
-                        int sender = get_u32(payload, 0);
-                        chat_log.push_back("[" + std::to_string(sender) + "] " + payload.substr(4));
-                        if (chat_log.size() > 5) chat_log.erase(chat_log.begin());
+                        uint32_t sender = get_u32(payload, 0);
+                        auto it = players.find(sender);
+                        if (it != players.end()) {
+                            chat_log.push_back("[" + it->second.nick + "] " + payload.substr(4));
+                            if (chat_log.size() > 5) chat_log.erase(chat_log.begin());
+
+                        }
                     }
 
                     // 출력
@@ -617,7 +630,7 @@ int main() {
                         send_action(sock, key);
                     }
                 } else if (visit_open) {
-                    std::vector<int> o = others();
+                    std::vector<uint32_t> o = others();
                     if (key >= '1' && key <= '9' && (size_t)(key - '1') < o.size()) {
                         send_visit(sock, o[key-'1']);
                         visit_open = false;
