@@ -9,6 +9,8 @@
 #include <sys/timerfd.h> //timerfd
 #include <cstdint> // uint64_t
 #include <cstdlib>
+#include <algorithm>
+#include <iterator>
 
 #include <fcntl.h> // fcntl, O_NONBLOCK
 #include <cerrno> // errno, EAGAIN
@@ -19,22 +21,23 @@
 #include <queue>
 #include <vector>
 #include <mutex>
-#include <mysql/mysql.h>
 
 #include "./protocol.h"
+#include "./util.h"
+#include "./db.h"
 #include "./farm.h"
 #include "./thread_pool.h"
 
-MYSQL* db = nullptr;
-
-std::queue<std::function<void()>> db_results; // 워커 -> 메인으로 보낼 일 (db 워커가 결과 보내는 곳)
-std::mutex db_results_mtx;
-int db_event_fd = -1;
 bool server_running = true;
 
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
+    bool logging_in = false; // 로그인 중 표기 
+
+    uint32_t user_id = 0; // 0이면 로그인 전임을 의미
+    std::string nick;
+
     std::string send_buf;
     std::string recv_buf;
     
@@ -48,12 +51,11 @@ struct Client {
     int held[CROP_COUNT] = {0};
 
     // 지금 보고 있는 농장의 주인 id
-    int current_farm = -1;
+    uint32_t current_farm = 0;
 };
-std::unordered_map<int, Client> clients;
+std::unordered_map<int, Client> clients; // 키 = fd
 
-struct Farm { Tile tiles[FIELD_SIZE][FIELD_SIZE]; };
-std::unordered_map<int, Farm> farms; // 키 = 주인id(fd)
+std::unordered_map<uint32_t, Farm> farms; // 키 = 주인id(user_id)
 
 int epfd = epoll_create1(0); // 장부 개설
 
@@ -63,41 +65,34 @@ void set_nonblocking(int fd) {
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
 
-// 워커에서 부름: 메인 스레드가 실행할 함수를 넣고 초인종 울리기 (event_fd)
-void post_to_main(std::function<void()> fn) {
-    {
-        std::lock_guard<std::mutex> lock(db_results_mtx);
-        db_results.push(std::move(fn));
-    }
-    uint64_t one = 1;
-    ssize_t w = write(db_event_fd, &one, sizeof(one));
-    (void) w;
-}
-
-// 클라한테 해당 클라의 id(fd) 전송
-void send_welcome(int fd) {
-    std::string payload;
-    put_u32(payload, fd);
-    std::string pkt = make_packet(PKT_WELCOME, payload);
-    ssize_t w = write(fd, pkt.data(), pkt.size());
-    (void) w;
-}
-
 // 접속 중인 사람 목록을 전원에게
 void broadcast_player_list() {
+    std::string payload_tmp;
+    int cnt = 0;
+    for (auto& [cfd, c]: clients) {
+        if (c.user_id != 0) { // 로그인 완료한 플레이어 목록
+            put_u32(payload_tmp, c.user_id);
+            payload_tmp += (char)c.nick.size();
+            payload_tmp += c.nick;
+            cnt++;
+        }
+    }
     std::string payload;
-    put_u16(payload, clients.size());
-    for (auto& [cfd, c]: clients) put_u32(payload, cfd);
+    put_u16(payload, cnt);
+    payload += payload_tmp;
     
     std::string pkt = make_packet(PKT_PLAYER_LIST, payload);
     for (auto& [cfd, c]: clients) {
-        ssize_t w = write(cfd, pkt.data(), pkt.size());
-        (void) w;
+        if (c.user_id != 0) { // 로그인 완료한 플레이어에게만 플레이어 목록 전송
+            ssize_t w = write(cfd, pkt.data(), pkt.size());
+            (void) w;
+        }
+
     }
 }
 
 // 농장 입장할 때 마다: 입장한 농장 + 서버 현재 시각 + 밭 전체 스냅샷
-void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 농장의 owner
+void send_farm_snapshot(int fd, uint32_t farm_owner_id) { // farm_owner_id: 현재 농장의 owner
     std::string payload;
 
     // 0) owner_id
@@ -129,7 +124,7 @@ void send_farm_snapshot(int fd, int farm_owner_id) { // farm_owner_id: 현재 �
 }
 
 // 칸 하나의 현재 값을 담은 TILE_UPDATE 패킷을 만든다
-std::string make_tile_update(int farm_owner_id, uint8_t x, uint8_t y) {
+std::string make_tile_update(uint32_t farm_owner_id, uint8_t x, uint8_t y) {
     std::string payload;
     Tile tile = farms[farm_owner_id].tiles[y-FIELD_Y0][x-FIELD_X0];
 
@@ -144,7 +139,7 @@ std::string make_tile_update(int farm_owner_id, uint8_t x, uint8_t y) {
 }
 
 // 그 방(농장)에 있는 사람 전원에게 pkt 전송
-void send_to_room(int farm_owner_id, const std::string& pkt) {
+void send_to_room(uint32_t farm_owner_id, const std::string& pkt) {
     for (auto& [cfd, c]: clients) {
         if (c.current_farm != farm_owner_id) continue;
         ssize_t w = write(cfd, pkt.data(), pkt.size());
@@ -153,7 +148,7 @@ void send_to_room(int farm_owner_id, const std::string& pkt) {
 }
 
 // 땅 업데이트 시 요청자 한 명에게만 전송
-void send_tile_update(int fd, int farm_owner_id, uint8_t x, uint8_t y) {
+void send_tile_update(int fd, uint32_t farm_owner_id, uint8_t x, uint8_t y) {
     std::string pkt = make_tile_update(farm_owner_id, x, y);
     ssize_t w = write(fd, pkt.data(), pkt.size());
     (void) w;
@@ -175,10 +170,19 @@ void send_wallet(int fd, Client& c) {
     (void) w;
 }
 
+void send_auth_result(int fd, uint8_t reason, uint32_t account_id) {
+    std::string payload;
+    payload += (char) reason;
+    put_u32(payload, account_id);
+    std::string pkt = make_packet(PKT_AUTH_RESULT, payload);
+    ssize_t w = write(fd, pkt.data(), pkt.size());
+    (void) w;
+}
+
 // 방문 처리
 void handle_visit(int fd, Client& c, const std::string& payload) {
     if (payload.size() != 4) return;
-    int owner = (int)get_u32(payload, 0);
+    uint32_t owner = get_u32(payload, 0);
     if (!farms.count(owner)) return; // 없는 농장이면 무시
     if (owner == c.current_farm) return; // 이미 그 방이면 무시
 
@@ -194,7 +198,7 @@ void handle_chat(int fd, Client& c, const std::string& payload) {
         if (ch < 0x20 || ch == 0x7f) return; // 제어문자가 섞이면 무시
 
     std::string out;
-    put_u32(out, fd); // 보낸 사람
+    put_u32(out, c.user_id); // 보낸 사람
     out += payload;
     send_to_room(c.current_farm, make_packet(PKT_CHAT_MSG, out)); // 같은 방 전원 (보낸 사람 포함)
 
@@ -252,7 +256,7 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
     }
 
     // '수확'의 경우, 수행 유저와 농장주가 다르다면 거부
-    if (type == PKT_HARVEST && fd != c.current_farm) {
+    if (type == PKT_HARVEST && c.user_id != c.current_farm) {
         send_tile_update(fd, c.current_farm, x, y);
         return;
     }
@@ -282,7 +286,7 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
         }
         case PKT_WATER:
             ok = water(t, now); 
-            if (ok && c.current_farm != fd) { // 남의 농장에 물 줌 = 방문자 보상
+            if (ok && c.current_farm != c.user_id) { // 남의 농장에 물 줌 = 방문자 보상
                 c.coin += 2;
                 send_wallet(fd, c);
             }            
@@ -339,6 +343,103 @@ void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) 
     }
 }
 
+void handle_signup(int fd, std::string payload) {
+    if (payload.empty()) return;
+    
+    uint8_t nick_len = payload[0];
+    if (payload.size() < ((size_t)1 + nick_len)) return;
+    std::string nick = payload.substr(1, nick_len);
+
+    int chars = utf8_len(nick); // 한글 글자 수 세기 때문에 utf8_len 사용
+    if (chars < 2 || chars > 15) {
+        send_auth_result(fd, AUTH_BAD_FORMAT, 0); // 닉네임 길이: 2 ~ 15
+        return;
+    }
+    payload.erase(0, 1 + nick_len);
+
+    uint8_t pw_len = payload[0];
+    if (payload.size() < ((size_t)1 + pw_len)) return;
+    std::string pw = payload.substr(1, pw_len);
+
+    for (unsigned char uc : pw) { // 한글 및 이상 문자 체크
+        if (uc < 32 || uc > 126) { // 공백(32) ~ '~'(126)만 허용 → 한글·제어문자 거부
+            send_auth_result(fd, AUTH_BAD_FORMAT, 0);
+            return;
+        }
+    }
+
+    if (pw.size() < 6 || pw.size() > 15) { // pw는 한글 허용하지 않기 때문에 바로 size()로 길이 체크
+        send_auth_result(fd, AUTH_BAD_FORMAT, 0); // pw 길이: 6 ~ 15
+        return;
+    }
+    payload.erase(0, 1 + pw_len);
+
+    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+        uint32_t id = 0;
+        uint8_t reason = signup_db(nick, pw, id);
+
+        post_to_main([fd, reason, id] {
+            if (!clients.count(fd)) return;
+            send_auth_result(fd, reason, id);
+        });
+    });
+}
+
+void handle_login(int fd, std::string payload) {
+    if (payload.empty()) return;
+
+    if (!clients.count(fd)) return;
+    Client& c = clients[fd];
+
+    uint8_t nick_len = payload[0];
+    if (payload.size() < ((size_t)1 + nick_len)) return;
+    std::string nick = payload.substr(1, nick_len);
+    payload.erase(0, 1 + nick_len);
+
+    uint8_t pw_len = payload[0];
+    if (payload.size() < ((size_t)1 + pw_len)) return;
+    std::string pw = payload.substr(1, pw_len);
+    payload.erase(0, 1 + pw_len);
+
+    if (c.logging_in) return;
+    else c.logging_in = true;
+
+    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+        uint32_t id = 0;
+        uint8_t reason = login_db(nick, pw, id);
+
+        UserData user_data = {};
+        if (reason == AUTH_OK) {
+            bool load = load_user_db(id, user_data);
+            if (!load) reason = AUTH_SERVER_ERROR;
+        }
+
+        post_to_main([fd, reason, id, user_data] {
+            if (!clients.count(fd)) return;
+            Client& c = clients[fd];
+
+            send_auth_result(fd, reason, id);
+            c.logging_in = false;
+
+            if (reason == AUTH_OK) {
+                c.user_id = id;
+                c.nick = user_data.nick;
+                c.coin = user_data.coin;
+                std::copy(std::begin(user_data.seeds), std::end(user_data.seeds), c.seeds);
+                std::copy(std::begin(user_data.held), std::end(user_data.held), c.held);
+                c.current_farm = id;
+
+                farms[id] = user_data.farm;
+
+                // 농장 입장 후 처리 (연결 클라이언트에게 정보 전송)
+                send_farm_snapshot(fd, id);
+                send_wallet(fd, c);
+                broadcast_player_list();
+            }
+        });
+    });
+}
+
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
@@ -348,9 +449,9 @@ void on_tick() {
         uint16_t client_cnt = 0;
         for (auto& [cfd, c]: clients) {
             if (c.current_farm != owner) continue;
-            put_u32(body, cfd);
-            put_u32(body, c.x);
-            put_u32(body, c.y);
+            put_u32(body, c.user_id);
+            body.push_back(c.x);
+            body.push_back(c.y);
             client_cnt ++;
         }
         if (client_cnt == 0) continue; // 아무도 없는 방은 건너뜀
@@ -365,20 +466,29 @@ void on_tick() {
 }
 
 void handle_packet(int fd, Client& c, uint16_t type, const std::string& payload) {
-    switch (type) {
-        case PKT_MOVE:
-            handle_move(c, payload); break;
-        case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
-            handle_farm_action(fd, c, type, payload); break;
-        case PKT_BUY: case PKT_SELL:
-            handle_wallet(fd, c, type, payload); break;
-        case PKT_VISIT:
-            handle_visit(fd, c, payload); break;
-        case PKT_CHAT:
-            handle_chat(fd, c, payload); break;
-        default:
-            break; // 모르는 type, 서버 -> 클라 전용 type: 무시
+    if (c.user_id == 0) {
+        if (type == PKT_SIGNUP) {
+            handle_signup(fd, payload);
+        } else if (type == PKT_LOGIN) {
+            handle_login(fd, payload);
+        }
+    } else {
+        switch (type) {
+            case PKT_MOVE:
+                handle_move(c, payload); break;
+            case PKT_TILL: case PKT_PLANT: case PKT_WATER: case PKT_HARVEST:
+                handle_farm_action(fd, c, type, payload); break;
+            case PKT_BUY: case PKT_SELL:
+                handle_wallet(fd, c, type, payload); break;
+            case PKT_VISIT:
+                handle_visit(fd, c, payload); break;
+            case PKT_CHAT:
+                handle_chat(fd, c, payload); break;
+            default:
+                break; // 모르는 type, 서버 -> 클라 전용 type: 무시
+        }
     }
+
 }
 
 int main() {
@@ -393,21 +503,17 @@ int main() {
     d_ev.data.fd = db_event_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, db_event_fd, &d_ev);
 
-    mysql_library_init(0, nullptr, nullptr); // 라이브러리 초기화: 스레드 만들기 전에 한 번
-    ThreadPool db_pool(1); // 워커 스레드 한 개 생성
+    if (!db_init()) return 1;
+    ThreadPool db_pool_tmp(1); // 워커 스레드 한 개 생성
+    db_pool = &db_pool_tmp;
 
     // 생성된 스레드의 첫 작업 - DB와의 연결 작업 진행하라고 잡큐에 넣어주기 
-    db_pool.enqueue([]{
-        const char* pw = std::getenv("PUMASI_DB_PW");
-        db = mysql_init(nullptr);
-        if (!mysql_real_connect(db, "localhost", "pumasi", pw, "pumasi", 0, nullptr, 0)) {
-            printf("connect fail: %s\n", mysql_error(db));
-            post_to_main([] { // 메인에 "서버 종료" 넘기기
+    db_pool -> enqueue([]{
+        if (!db_connect()) {
+            post_to_main([] {
                 printf("db 연결 실패로 서버 종료\n");
                 server_running = false;
             });
-        } else {
-            printf("db connected\n");
         }
     });
 
@@ -465,20 +571,7 @@ int main() {
             int fd = events[i].data.fd; // 이 이벤트 주인 fd
 
             if (fd == db_event_fd) {
-                uint64_t cnt;
-                ssize_t r = read(db_event_fd, &cnt, sizeof(cnt));
-                (void) r;
-
-                std::queue<std::function<void()>> local;
-                {
-                    std::lock_guard<std::mutex> lock(db_results_mtx);
-                    std::swap(local, db_results);
-                }
-
-                while(!local.empty()) {
-                    local.front()(); // 맨 앞의 함수(`local.front()`)를 받아서 실행(`()`)
-                    local.pop();
-                }
+                drain_db_results();
                 continue;
             }
 
@@ -505,13 +598,6 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
-                    clients[client_fd].current_farm = client_fd; // 자기 농장에 입장
-                    farms[client_fd] = Farm{};
-
-                    send_welcome(client_fd);
-                    send_farm_snapshot(client_fd, client_fd); // (받는 사람, 어느 농장)
-                    send_wallet(client_fd, clients[client_fd]);
-                    broadcast_player_list();
 
                     continue;
                 } else {
@@ -567,16 +653,18 @@ int main() {
                     
                     if (closed) {
                         if (clients.count(fd)) {
+                            uint32_t closing_id = clients[fd].user_id;
+
                             // 이 사람의 농장에 와 있던 방문자들 각자 자기 농장으로
                             for (auto& [cfd, c]: clients) {
-                                if (cfd == fd || c.current_farm != fd) continue;
-                                c.current_farm = cfd; // 본인 농장
+                                if (closing_id == 0 || cfd == fd || c.current_farm != closing_id) continue;
+                                c.current_farm = c.user_id; // 본인 농장
                                 c.x = 0; c.y = 0; // 입장 시 위치 초기화
-                                send_farm_snapshot(cfd, cfd);
+                                send_farm_snapshot(cfd, c.user_id);
                             }
                             clients.erase(fd);
-                            if (farms.count(fd)) {
-                                farms.erase(fd);
+                            if (farms.count(closing_id)) {
+                                farms.erase(closing_id);
                             }
                             broadcast_player_list();
                         }

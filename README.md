@@ -5,7 +5,7 @@
 
 C++17 / Linux epoll 기반 server-authoritative 서버와 콘솔 클라이언트.
 
-> **진행 중** — 코어 루프, 상점·인벤토리, 방·방문, 채팅까지 완료. DB 저장·로그인은 예정 ([로드맵](#로드맵))
+> **진행 중** — 코어 루프, 상점·인벤토리, 방·방문, 채팅, 가입·로그인(계정·농장 DB 로드)까지 완료. 상태 저장·중복 로그인은 진행 중 ([로드맵](#로드맵))
 
 ## 화면
 
@@ -43,7 +43,9 @@ _: 맨땅 | =: 갈린땅 | t/c/p: 작물(마름) | T/C/P: 작물(젖음) | *: �
 
 ## 기술 스택
 
-- C++17, Linux (epoll, timerfd)
+- C++17, Linux (epoll, timerfd, eventfd)
+- MySQL 8.4 (C API, prepared statement), DB 호출은 워커 스레드
+- libsodium (비밀번호 해시 argon2id)
 - 길이 접두사 바이너리 TCP 프로토콜
 - 콘솔 클라이언트 (raw 터미널 입력)
 
@@ -59,11 +61,16 @@ flowchart LR
         L[listen_fd<br/>접속 수락]
         T[timer_fd<br/>50ms tick]
         C[client_fd ET<br/>프레임 파싱]
-        H[handle_packet<br/>이동·농사·상점·방문·채팅]
-        F[(farms<br/>주인 id별 밭 36칸)]
-        P[(clients<br/>위치·코인·인벤·현재 방)]
+        H[handle_packet<br/>이동·농사·상점·방문·채팅·로그인]
+        F[(farms<br/>주인 계정 id별 밭 36칸)]
+        P[(clients<br/>계정·위치·코인·인벤·현재 방)]
         R[send_to_room<br/>같은 방에만 전송]
+        E[db_event_fd<br/>DB 결과 알림]
     end
+    subgraph worker [DB 워커 스레드]
+        W[가입·로그인·로드]
+    end
+    D[(MySQL)]
     A & B -. 접속 .-> L
     L --> P
     A & B -- TCP 바이너리 --> C
@@ -72,6 +79,11 @@ flowchart LR
     H --> P
     H --> R
     T --> R
+    H -- 일감 큐 --> W
+    W --> D
+    W -- 결과 큐 --> E
+    E --> P
+    E --> F
     R -- 위치 스냅샷·칸 갱신·채팅 --> A & B
 ```
 
@@ -102,15 +114,24 @@ flowchart LR
 
 ### 5. 바이너리 프로토콜
 - `[length:2][type:2][payload]` 길이 접두사 프레이밍, 빅엔디안.
-- 패킷 번호를 대역으로 묶었다. 10번대 농사 요청, 20번대 밭 알림, 30번대 경제 요청, 40번대 경제 알림, 50번대 방문 요청, 60번대 방문 알림.
+- 패킷 번호를 대역으로 묶었다. 10번대 농사 요청, 20번대 밭 알림, 30번대 경제 요청, 40번대 경제 알림, 50번대 방문 요청, 60번대 방문 알림, 70번대 계정 요청, 80번대 계정 알림.
+
+### 6. DB 호출은 워커 스레드, 게임 상태는 메인 스레드만
+- 쿼리와 비밀번호 해시(argon2id는 일부러 느린 함수)를 이벤트 루프에서 하면 그동안 모든 플레이어의 tick이 멈춘다.
+- 메인 루프는 일감을 큐에 넣기만 한다. 워커가 DB를 다룬 뒤 결과를 결과 큐에 넣고 `eventfd`로 메인 루프를 깨운다.
+- 결과 적용(`clients`·`farms` 변경)은 메인 스레드에서만 한다. 게임 상태를 한 스레드만 만지므로 게임 상태에 락이 필요 없다.
+- 워커는 1개. 같은 계정의 작업이 들어온 순서대로 실행된다.
+
+### 7. 플레이어 구분은 계정 id
+- 접속(fd)은 재접속할 때마다 바뀌는 번호라 저장 기준이 될 수 없다. 농장 키, 패킷 안의 id, 주인 검사는 전부 계정 id를 쓰고, fd는 어느 소켓에 쓸지에만 쓴다.
+- 로그인 전 연결은 계정이 없는 상태로, 가입·로그인 패킷만 받고 나머지는 무시한다.
 
 ## 패킷
 
 | 번호 | 이름 | 방향 | payload |
 |---|---|---|---|
 | 2 | MOVE | 클라→서버 | `[dx:1][dy:1]` |
-| 3 | SNAPSHOT | 서버→클라 | `[count:2]` + count×`[id:4][x:4][y:4]` — 같은 방 위치, 매 tick |
-| 4 | WELCOME | 서버→클라 | `[id:4]` — 접속 직후 |
+| 3 | SNAPSHOT | 서버→클라 | `[count:2]` + count×`[id:4][x:1][y:1]` — 같은 방 위치, 매 tick |
 | 10~13 | TILL / PLANT / WATER / HARVEST | 클라→서버 | `[x:1][y:1]` (PLANT만 `[crop:1]` 추가) |
 | 20 | TILE_UPDATE | 서버→클라 | `[x:1][y:1][state:1][crop:1][stage:1][watered_at:8]` |
 | 21 | FARM_SNAPSHOT | 서버→클라 | `[owner_id:4][server_now:8]` + 36칸×`[state:1][crop:1][stage:1][watered_at:8]` — 방 입장 시 |
@@ -118,25 +139,46 @@ flowchart LR
 | 40 | WALLET | 서버→클라 | `[coin:4]` + 작물별 `[seeds:1][held:1]` |
 | 50 | VISIT | 클라→서버 | `[owner_id:4]` — 내 농장으로 = 내 id |
 | 51 | CHAT | 클라→서버 | 메시지 바이트(UTF-8), 최대 200바이트 |
-| 60 | PLAYER_LIST | 서버→클라 | `[count:2]` + count×`[id:4]` — 접속·퇴장 시 전원 |
+| 60 | PLAYER_LIST | 서버→클라 | `[count:2]` + count×`[id:4][nick_len:1][nick]` — 로그인·퇴장 시 로그인한 전원 |
 | 61 | CHAT_MSG | 서버→클라 | `[sender_id:4]` + 메시지 바이트 — 같은 방 전원 |
+| 70 / 71 | SIGNUP / LOGIN | 클라→서버 | `[nick_len:1][nick][pw_len:1][pw]` |
+| 80 | AUTH_RESULT | 서버→클라 | `[reason:1][account_id:4]` — reason 0 성공 / 1 형식 오류 / 2 닉네임 중복 / 3 닉네임·비밀번호 불일치 / 4 서버 오류 |
+
+id는 전부 계정 id.
 
 ## 빌드 & 실행
 
+필요한 것: g++, MySQL 8.4 서버, `libmysqlclient-dev`(8.2 이상), `libsodium-dev`
+
+DB 준비 (처음 한 번)
+
+```sql
+CREATE DATABASE pumasi;
+CREATE USER 'pumasi'@'localhost' IDENTIFIED BY 'DB 비밀번호';
+GRANT ALL ON pumasi.* TO 'pumasi'@'localhost';
+```
+
 ```bash
-g++ -std=c++17 -O2 -o game_server src/game_server.cpp
+mysql -u pumasi -p pumasi < sql/schema.sql
+```
+
+빌드·실행
+
+```bash
+g++ -std=c++17 -O2 -pthread -o game_server src/game_server.cpp src/db.cpp src/thread_pool.cpp $(mysql_config --cflags --libs) -lsodium
 g++ -std=c++17 -O2 -o client src/client.cpp
 
-./game_server   # 포트 9000
+PUMASI_DB_PW='DB 비밀번호' ./game_server   # 포트 9000
 ./client        # 다른 터미널에서. 여러 개 띄우면 여러 명
 ```
 
-조작 (행동 대상 = 바라보는 앞 칸)
+조작
 
 | 키 | 동작 |
 |---|---|
+| 로그인·가입 창 | 글자 입력, `↑` `↓` 입력칸 이동, `Enter` 요청, `Esc` 처음부터, `Tab` 로그인↔가입 전환 |
 | `w` `a` `s` `d` | 이동 (마지막 이동 방향을 바라봄) |
-| `t` / `1` `2` `3` / `e` / `r` | 갈기 / 심기(순무·당근·호박) / 물 / 수확 |
+| `t` / `1` `2` `3` / `e` / `r` | 갈기 / 심기(순무·당근·호박) / 물 / 수확 — 대상은 바라보는 앞 칸 |
 | `b` | 상점: `1` `2` `3` 씨앗 사기, `Shift`+`1` `2` `3` 수확물 팔기, `b` 닫기 |
 | `v` | 방문: 번호로 농장 선택, `h` 내 농장으로, `v` 닫기 |
 | `Enter` | 채팅: 입력창 열기, 입력 후 `Enter` 전송, `Esc` 취소, `Backspace` 한 글자 지우기 |
@@ -167,9 +209,10 @@ g++ -std=c++17 -o protocol_test src/protocol_test.cpp && ./protocol_test  # u64 
 - [x] 상점·인벤토리·코인
 - [x] 방·방문·방 단위 동기화
 - [x] 채팅
+- [x] 가입·로그인, 계정·농장 DB 로드 (DB 호출은 워커 스레드로 분리)
+- [ ] 상태 저장 (주기·로그아웃·정상 종료), 중복 로그인
 - [ ] Unity 클라이언트
-- [ ] DB 저장·로그인 (DB 호출은 워커 스레드로 분리)
 - [ ] 주인이 오프라인인 농장 방문 (DB 로드/언로드)
 - [ ] 봇 부하 테스트·데모 영상
 
-현재는 접속이 끊기면 그 사람 농장이 사라진다(저장 전).
+현재는 로그인할 때 DB에서 계정·농장을 읽어 오지만, 바뀐 상태는 아직 저장하지 않는다. 접속이 끊기면 그 접속 동안의 변경은 사라진다.

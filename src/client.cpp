@@ -15,16 +15,28 @@
 #include <sys/ioctl.h> // ioctl, FIONREAD
 
 #include "./protocol.h"
+#include "./util.h"
 #include "./farm.h"
+
+std::string signup_nick;
+std::string signup_pw;
+std::string signup_pw2;
+std::string signup_msg;
+int signup_field = 0; // 0: 닉네임, 1: 비밀번호, 2: 비밀번호 확인
+
+std::string login_nick;
+std::string login_pw;
+std::string login_msg;
+int login_field = 0; // 0: 닉네임, 1: 비밀번호
 
 struct Client {
     int x;
     int y;
 };
-std::unordered_map<int, Client> clients; // 현재 같은 방에 존재하는 client들 
+std::unordered_map<uint32_t, Client> clients; // 현재 같은 방에 존재하는 client들 / key: user_id 
 
 Tile farm[FIELD_SIZE][FIELD_SIZE];
-int my_id = -1;
+uint32_t my_id = 0;
 
 int64_t server_offset = 0; // 서버와의 시간차
 
@@ -37,6 +49,12 @@ int my_held[CROP_COUNT] = {0};
 
 std::string chat_buf; // 입력 중인 메시지
 std::vector<std::string> chat_log; // 최근 대화
+
+// 회원가입 창
+bool signup_open = false;
+
+// 로그인 창
+bool login_open = true;
 
 // 상점 창
 bool shop_open = false;
@@ -51,19 +69,72 @@ bool chat_open = false;
 bool chat_drop = false;
 
 // 현재 농장 주인
-int farm_owner = -1;
+uint32_t farm_owner = 0;
 
 // 전체 유저 목록
-std::vector<int> players;
+struct Player {
+    std::string nick;
+};
+std::unordered_map<uint32_t, Player> players;
 
 // 나를 뺀 접속자 목록 (화면과 키 처리가 같은 순서를 써야 함)
-std::vector<int> others() {
-    std::vector<int> v;
-    for (int id : players) if (id != my_id) v.push_back(id);
-    return v;
+std::vector<uint32_t> others() {
+    std::vector<uint32_t> o;
+    for (const auto& [id, player] : players) if (id != my_id) o.push_back(id);
+    return o;
 }
 
 int epfd = epoll_create1(0);
+
+// 회원가입 창
+void draw_signup() {
+    printf("=== 품앗이 가입 ===\n\n");
+
+    // 닉네임
+    printf("%s 닉네임: %s%s\n",
+            signup_field == 0 ? ">" : " ", // 지금 입력 중인 칸 표시
+            signup_nick.c_str(),
+            signup_field == 0 ? "_" : ""); // 커서
+
+    // 비밀번호 - 글자 수만큼 '*'
+    std::string masked(signup_pw.size(), '*');
+    printf("%s 비밀번호: %s%s\n",
+            signup_field == 1 ? ">" : " ",
+            masked.c_str(),
+            signup_field == 1 ? "_" : "");
+
+    // 비밀번호 확인 - 글자 수만큼 '*'
+    std::string masked2(signup_pw2.size(), '*');
+    printf("%s 비밀번호 확인: %s%s\n",
+            signup_field == 2 ? ">" : " ",
+            masked2.c_str(),
+            signup_field == 2 ? "_" : "");
+
+
+    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 가입 요청, Esc: 처음부터, Tab: 로그인 창으로 이동\n");
+    if (!signup_msg.empty()) printf("%s\n", signup_msg.c_str()); // 실패 이유 등
+}
+
+// 로그인 창
+void draw_login() {
+    printf("=== 품앗이 로그인 ===\n\n");
+
+    // 닉네임
+    printf("%s 닉네임: %s%s\n",
+            login_field == 0 ? ">" : " ", // 지금 입력 중인 칸 표시
+            login_nick.c_str(),
+            login_field == 0 ? "_" : ""); // 커서
+
+    // 비밀번호 - 글자 수만큼 '*'
+    std::string masked(login_pw.size(), '*');
+    printf("%s 비밀번호: %s%s\n",
+            login_field == 1 ? ">" : " ",
+            masked.c_str(),
+            login_field == 1 ? "_" : "");
+
+    printf("\n ↑: 이전 칸, ↓: 다음 칸, Enter: 로그인 요청, Esc: 처음부터, Tab: 회원가입 창으로 이동\n");
+    if (!login_msg.empty()) printf("%s\n", login_msg.c_str()); // 실패 이유 등
+}
 
 // 상점 창
 void draw_shop() {
@@ -85,9 +156,9 @@ void draw_shop() {
 // 유저 선택(방문 목적) 창
 void draw_visit() {
     printf("=== 방문 ===\n");
-    std::vector<int> o = others();
+    std::vector<uint32_t> o = others();
     if (o.empty()) printf("(방문할 사람 없음)\n");
-    for (size_t i = 0 ; i < o.size() ; i++) printf("%zu. %d번 농장\n", i + 1, o[i]);
+    for (size_t i = 0 ; i < o.size() ; i++) printf("%zu. %s 네 농장\n", i + 1, players[o[i]].nick.c_str());
     printf("\n번호: 방문 | h: 내 농장으로 | v/q: 닫기\n");
 }
 
@@ -98,7 +169,11 @@ void draw() {
     // 화면 지우고 커서 맨 위로
     printf("\033[2J\033[H"); // '\033': ESC, '[2J': 화면 클리어, '[H': 커서를 좌상단으로
 
-    if (shop_open) { // 상점 창
+    if (signup_open) { // 회원가입 창
+        draw_signup();
+    } else if (login_open) { // 로그인 창
+        draw_login();
+    } else if (shop_open) { // 상점 창
         draw_shop();
     } else if (visit_open) { // 유저 리스트 창
         draw_visit();
@@ -196,7 +271,7 @@ void send_action(int sock, char key) {
 }
 
 // 다른 사람 농장 방문
-void send_visit(int sock, int owner) {
+void send_visit(int sock, uint32_t owner) {
     std::string payload;
     put_u32(payload, owner);
     std::string pkt = make_packet(PKT_VISIT, payload);
@@ -266,6 +341,9 @@ int main() {
 
     // 받기 루프 
     while (true) {
+        // 초기화
+        draw();
+
         int n = epoll_wait(epfd, events, 2, -1);
         if (n < 0) { perror("epoll_wait"); break; }
 
@@ -289,23 +367,52 @@ int main() {
                     std::string payload = recv_buf.substr(4, length);
                     recv_buf.erase(0, 4 + length);
 
+                    // 로그인 전에는 PKT_AUTH_RESULT 외에는 무시
+                    if (my_id == 0 && type != PKT_AUTH_RESULT) continue;
+
                     // 처리
-                    if (type == PKT_SNAPSHOT) {
+                    if (type == PKT_AUTH_RESULT) {
+                        int result = (uint8_t)payload[0];
+                        if (result == AUTH_OK) {
+                            if (signup_open && !login_open) {
+                                signup_open = false;
+                                signup_msg.clear();
+                                signup_nick.clear();
+                                signup_pw.clear();
+                                signup_pw2.clear();
+
+                                login_open = true;
+                            } else if (login_open) {
+                                login_open = false;
+                                login_msg.clear();
+                                login_nick.clear();
+                                login_pw.clear();
+
+                                my_id = get_u32(payload, 1);
+                            }
+                        } else if (result == AUTH_BAD_FORMAT) {
+                            signup_msg = "닉네임 또는 비밀번호 형식이 잘못되었습니다.";
+                        } else if (result == AUTH_DUP_NICK) {
+                            signup_msg = "이미 존재하는 닉네임입니다.";
+                        } else if (result == AUTH_WRONG) {
+                            login_msg = "닉네임 또는 비밀번호가 틀렸습니다.";
+                        } else if (result == AUTH_SERVER_ERROR) {
+                            if (signup_open) signup_msg = "서버 오류가 발생했습니다.";
+                            if (login_open) login_msg = "서버 오류가 발생했습니다.";
+                        }
+                    } else if (type == PKT_SNAPSHOT) {
                         // 모든 유저의 위치값 받기
                         clients.clear();
                         int client_cnt = get_u16(payload, 0);
 
                         for (int i = 0 ; i < client_cnt ; i++) {
-                            int j = 3*i;
-                            int id = get_u32(payload, 4*j + 2);
-                            int x = get_u32(payload, 4*(j+1) + 2);
-                            int y = get_u32(payload, 4*(j+2) + 2);
+                            int off = 2 + 6*i;
+                            uint32_t id = get_u32(payload, off);
+                            int x = (uint8_t)payload[off + 4];
+                            int y = (uint8_t)payload[off + 5];
 
                             clients[id] = Client{.x = x, .y = y};
                         }
-                    } else if (type == PKT_WELCOME) {
-                        // 서버에서의 내 id 값 받기
-                        my_id = get_u32(payload, 0);
                     } else if (type == PKT_FARM_SNAPSHOT) {
                         farm_owner = get_u32(payload, 0); // 누구 농장인지 
                         server_offset = (int64_t)get_u64(payload, 4) - (int64_t)now_ms(); // 부호가 필요한 계산에서는 int로 캐스팅을 해준다
@@ -314,40 +421,50 @@ int main() {
                             for (int j = 0 ; j < FIELD_SIZE ; j++) {
                                 int offset = 12 + (i*FIELD_SIZE + j)*11;
 
-                                farm[i][j].state = payload[offset];
-                                farm[i][j].crop = payload[offset+1];
-                                farm[i][j].stage = payload[offset+2];
+                                farm[i][j].state = (uint8_t)payload[offset];
+                                farm[i][j].crop = (uint8_t)payload[offset+1];
+                                farm[i][j].stage = (uint8_t)payload[offset+2];
                                 farm[i][j].watered_at = get_u64(payload, offset+3);
                             }
                         }
                     } else if (type == PKT_TILE_UPDATE) {
-                        int x = payload[0];
-                        int y = payload[1];
+                        int x = (uint8_t)payload[0];
+                        int y = (uint8_t)payload[1];
 
-                        farm[y-FIELD_Y0][x-FIELD_X0].state = payload[2];
-                        farm[y-FIELD_Y0][x-FIELD_X0].crop = payload[3];
-                        farm[y-FIELD_Y0][x-FIELD_X0].stage = payload[4];
+                        farm[y-FIELD_Y0][x-FIELD_X0].state = (uint8_t)payload[2];
+                        farm[y-FIELD_Y0][x-FIELD_X0].crop = (uint8_t)payload[3];
+                        farm[y-FIELD_Y0][x-FIELD_X0].stage = (uint8_t)payload[4];
                         farm[y-FIELD_Y0][x-FIELD_X0].watered_at = get_u64(payload, 5);
                     } else if (type == PKT_WALLET) {
                         my_coin = get_u32(payload, 0);
 
                         int offset = 4;
                         for (int i = 1 ; i < CROP_COUNT ; i++) {
-                            my_seeds[i] = payload[offset];
-                            my_held[i] = payload[offset+1];
+                            my_seeds[i] = (uint8_t)payload[offset];
+                            my_held[i] = (uint8_t)payload[offset+1];
                             offset += 2;
                         }
                     } else if (type == PKT_PLAYER_LIST) {
                         players.clear();
                         int player_cnt = get_u16(payload, 0);
 
+                        int offset = 2;
                         for (int i = 0 ; i < player_cnt ; i++) {
-                            players.push_back(get_u32(payload, i*4 + 2));
+                            uint32_t id = get_u32(payload, offset);
+                            int nick_len = (uint8_t)payload[offset + 4];
+                            std::string nick = payload.substr(offset + 5, nick_len);
+                            players[id] = Player{.nick = nick};
+
+                            offset += (4 + 1 + nick_len);
                         }
                     } else if (type == PKT_CHAT_MSG) {
-                        int sender = get_u32(payload, 0);
-                        chat_log.push_back("[" + std::to_string(sender) + "] " + payload.substr(4));
-                        if (chat_log.size() > 5) chat_log.erase(chat_log.begin());
+                        uint32_t sender = get_u32(payload, 0);
+                        auto it = players.find(sender);
+                        if (it != players.end()) {
+                            chat_log.push_back("[" + it->second.nick + "] " + payload.substr(4));
+                            if (chat_log.size() > 5) chat_log.erase(chat_log.begin());
+
+                        }
                     }
 
                     // 출력
@@ -376,6 +493,12 @@ int main() {
                         while (key_pending() && read(0, &c, 1) == 1) {
                             if (c >= '@' && c <= '~') break;
                         }
+                        // 가입 창에서 ↑(27 [ A) / ↓(27 [ B): 칸 이동
+                        if (signup_open && c == 'A') signup_field = (signup_field + 2) % 3;
+                        if (signup_open && c == 'B') signup_field = (signup_field + 1) % 3;
+                        // 로그인 창에서 ↑(27 [ A) / ↓(27 [ B): 칸 이동
+                        if (login_open && c == 'A') login_field = (login_field + 1) % 2;
+                        if (login_open && c == 'B') login_field = (login_field + 1) % 2;
                     } else if (c == 'O') {
                         // '27 O 글자'의 형태 - F1 ~ F4 - c 하나 더 받아서 무시해주면 됨
                         if (key_pending()) { r = read(0, &c, 1); }
@@ -384,7 +507,104 @@ int main() {
                     continue; // 이 키에 대한 처리를 여기서 끝냄(for 다음(다음 입력)으로 넘어감)
                 }
 
-                if (chat_open) {
+                if (signup_open) {
+                    if (key == 9) { // Tab: 로그인 창으로 이동
+                        signup_nick.clear();
+                        signup_pw.clear();
+                        signup_pw2.clear();
+                        signup_msg.clear();
+                        signup_field = 0;
+
+                        signup_open = false;
+                        login_open = true;
+                    }
+                    if (key == '\n' || key == '\r') { // Enter: 가입 요청
+                        if (signup_nick.empty() || signup_pw.empty() || signup_pw2.empty()) {
+                            signup_msg.clear();
+                            signup_msg = "모든 칸을 입력해주세요.";
+                        } else if (!signup_nick.empty() && (utf8_len(signup_nick) < 2 || utf8_len(signup_nick) > 15)) {
+                            signup_msg.clear();
+                            signup_msg = "닉네임은 2~15자 사이로 입력해주세요.";
+                        } else if (!signup_pw.empty() && (signup_pw.size() < 6 || signup_pw.size() > 15)) {
+                            signup_msg.clear();
+                            signup_msg = "비밀번호는 6~15자 사이로 입력해주세요.";
+                        } else if (!signup_pw.empty() && !signup_pw2.empty() && (signup_pw != signup_pw2)) {
+                            signup_msg.clear();
+                            signup_msg = "비밀번호가 일치하지 않습니다.";
+                        } else {
+                            std::string payload;
+                            payload += (char)signup_nick.size();
+                            payload += signup_nick;
+                            payload += (char)signup_pw.size();
+                            payload += signup_pw;
+                            std::string pkt = make_packet(PKT_SIGNUP, payload);
+                            
+                            ssize_t w = write(sock, pkt.data(), pkt.size());
+                            (void) w;
+                        }
+                    } else if (key == 27) { // Esc: 처음부터
+                        signup_nick.clear();
+                        signup_pw.clear();
+                        signup_pw2.clear();
+                        signup_msg.clear();
+                        signup_field = 0;
+                    } else if (key == 127 || key == 8) { // Backspace: 한 글자 지우기
+                        if (signup_field == 0 && !signup_nick.empty()) {
+                            while (!signup_nick.empty() && ((unsigned char)signup_nick.back() & 0xC0) == 0x80)
+                                signup_nick.pop_back(); // 뒤에서부터, 앞 2비트가 `10`인 바이트 지우기
+                            if (!signup_nick.empty()) signup_nick.pop_back(); // 마지막 남은 바이트 지우기
+                        }
+                        else if (signup_field == 1 && !signup_pw.empty()) signup_pw.pop_back();
+                        else if (signup_field == 2 && !signup_pw2.empty()) signup_pw2.pop_back();
+                    } else {
+                        unsigned char uc = (unsigned char)key; // 한글은 음수로 들어오기 때문에 unsigned char로 캐스팅해서 처리
+                        if (signup_field == 0 && uc >= 32) signup_nick += key;
+                        else if (signup_field == 1 && isprint(uc)) signup_pw += key; // 한글은 128~255, isprint는 32~126만 참
+                        else if (signup_field == 2 && isprint(uc)) signup_pw2 += key;
+                    }
+                } else if (login_open) {
+                    if (key == 9) { // Tab: 회원가입 창으로 이동
+                        login_nick.clear();
+                        login_pw.clear();
+                        login_msg.clear();
+                        login_field = 0;
+
+                        signup_open = true;
+                        login_open = false;
+                    }
+                    if (key == '\n' || key == '\r') { // Enter: 로그인 요청
+                        if (login_nick.empty() || login_pw.empty()) {
+                            login_msg.clear();
+                            login_msg = "모든 칸을 입력해주세요.";
+                        } else {
+                            std::string payload;
+                            payload += (char)login_nick.size();
+                            payload += login_nick;
+                            payload += (char)login_pw.size();
+                            payload += login_pw;
+                            std::string pkt = make_packet(PKT_LOGIN, payload);
+                            
+                            ssize_t w = write(sock, pkt.data(), pkt.size());
+                            (void) w;
+                        }
+                    } else if (key == 27) { // Esc: 처음부터
+                        login_nick.clear();
+                        login_pw.clear();
+                        login_msg.clear();
+                        login_field = 0;
+                    } else if (key == 127 || key == 8) { // Backspace: 한 글자 지우기
+                        if (login_field == 0 && !login_nick.empty()) {
+                            while (!login_nick.empty() && ((unsigned char)login_nick.back() & 0xC0) == 0x80)
+                                login_nick.pop_back(); // 뒤에서부터, 앞 2비트가 `10`인 바이트 지우기
+                            if (!login_nick.empty()) login_nick.pop_back(); // 마지막 남은 바이트 지우기
+                        }
+                        else if (login_field == 1 && !login_pw.empty()) login_pw.pop_back();
+                    } else {
+                        unsigned char uc = (unsigned char)key; // 한글은 음수로 들어오기 때문에 unsigned char로 캐스팅해서 처리
+                        if (login_field == 0 && uc >= 32) login_nick += key;
+                        else if (login_field == 1 && isprint(uc)) login_pw += key; // 한글은 128~255, isprint는 32~126만 참
+                    }
+                } else if (chat_open) {
                     if (key == '\n' || key == '\r') { // Enter: 보내고 닫기
                         if (!chat_buf.empty()) {
                             std::string pkt = make_packet(PKT_CHAT, chat_buf);
@@ -432,7 +652,7 @@ int main() {
                         send_action(sock, key);
                     }
                 } else if (visit_open) {
-                    std::vector<int> o = others();
+                    std::vector<uint32_t> o = others();
                     if (key >= '1' && key <= '9' && (size_t)(key - '1') < o.size()) {
                         send_visit(sock, o[key-'1']);
                         visit_open = false;

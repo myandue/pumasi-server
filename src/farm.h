@@ -30,6 +30,8 @@ struct Tile {
     uint64_t watered_at = 0; // 0 = 마름
 };
 
+struct Farm { Tile tiles[FIELD_SIZE][FIELD_SIZE]; };
+
 // 현재 시각 (에포크 ms, 1970-01-01부터 지난 ms)
 inline uint64_t now_ms() {
     using namespace std::chrono;
