@@ -29,10 +29,12 @@
 #include "./thread_pool.h"
 
 bool server_running = true;
+uint64_t conn_id_cnt = 0;
 
 const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
+    uint64_t conn_id = 0; // 커지기만 하는 유니크 키
     bool logging_in = false; // 로그인 중 표기 
 
     uint32_t user_id = 0; // 0이면 로그인 전임을 의미
@@ -64,6 +66,14 @@ void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK); // O_NONBLOCK 켜기, 현재 플래그 + 논블록 플래그 
 } 
 // fcntl: "이 fd의 속성을 바꿔줘" / 여기서는 소켓을 "읽을 게 없으면 잠들지 말고 즉시 EAGAIN 반환"모드로 바꾸는 것 
+
+void post_to_conn(int fd, uint64_t conn_id, std::function<void(Client&)> fn) {
+    post_to_main([fd, conn_id, fn] {
+        auto it = clients.find(fd);
+        if (it == clients.end() || it->second.conn_id != conn_id) return;
+        fn(it->second);
+    });
+}
 
 // 접속 중인 사람 목록을 전원에게
 void broadcast_player_list() {
@@ -374,12 +384,12 @@ void handle_signup(int fd, std::string payload) {
     }
     payload.erase(0, 1 + pw_len);
 
-    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+    uint64_t conn_id = clients[fd].conn_id;
+    db_pool -> enqueue([fd, conn_id, nick, pw]{ // 워커 스레드
         uint32_t id = 0;
         uint8_t reason = signup_db(nick, pw, id);
 
-        post_to_main([fd, reason, id] {
-            if (!clients.count(fd)) return;
+        post_to_conn(fd, conn_id, [fd, reason, id] (Client&) {
             send_auth_result(fd, reason, id);
         });
     });
@@ -404,7 +414,8 @@ void handle_login(int fd, std::string payload) {
     if (c.logging_in) return;
     else c.logging_in = true;
 
-    db_pool -> enqueue([fd, nick, pw]{ // 워커 스레드
+    uint64_t conn_id = clients[fd].conn_id;
+    db_pool -> enqueue([fd, conn_id, nick, pw]{ // 워커 스레드
         uint32_t id = 0;
         uint8_t reason = login_db(nick, pw, id);
 
@@ -414,10 +425,7 @@ void handle_login(int fd, std::string payload) {
             if (!load) reason = AUTH_SERVER_ERROR;
         }
 
-        post_to_main([fd, reason, id, user_data] {
-            if (!clients.count(fd)) return;
-            Client& c = clients[fd];
-
+        post_to_conn(fd, conn_id, [fd, reason, id, user_data] (Client& c) {
             send_auth_result(fd, reason, id);
             c.logging_in = false;
 
@@ -598,6 +606,7 @@ int main() {
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // <-> FD_SET
 
                     clients[client_fd] = Client{};
+                    clients[client_fd].conn_id = ++conn_id_cnt;
 
                     continue;
                 } else {
