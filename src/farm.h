@@ -24,6 +24,8 @@ const CropDef CROPS[CROP_COUNT] = {
 };
 
 struct Tile {
+    bool dirty = false;
+
     uint8_t state = BARE;
     uint8_t crop = 0;
     uint8_t stage = 0;

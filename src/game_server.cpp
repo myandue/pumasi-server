@@ -35,6 +35,8 @@ const int MAX_STEP = 1; // 한 tick 최대 이동량 (±1)
 
 struct Client {
     uint64_t conn_id = 0; // 커지기만 하는 유니크 키
+    
+    bool dirty = false;
     bool logging_in = false; // 로그인 중 표기 
 
     uint32_t user_id = 0; // 0이면 로그인 전임을 의미
@@ -290,7 +292,10 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
             ok = till(t); break;
         case PKT_PLANT: {
             ok = plant(t, crop);
-            if (ok) c.seeds[crop] -= 1;
+            if (ok) { 
+                c.seeds[crop] -= 1; 
+                c.dirty = true;
+            }
             send_wallet(fd, c);
             break;
         }
@@ -298,19 +303,24 @@ void handle_farm_action(int fd, Client& c, uint16_t type, const std::string& pay
             ok = water(t, now); 
             if (ok && c.current_farm != c.user_id) { // 남의 농장에 물 줌 = 방문자 보상
                 c.coin += 2;
+                c.dirty = true;
                 send_wallet(fd, c);
             }            
             break;
         case PKT_HARVEST: {
             uint8_t crop = t.crop; // harvest로 비우기 전에 crop 읽기.
             ok = harvest(t);
-            if (ok) c.held[crop] += 1;
+            if (ok) {
+                c.held[crop] += 1; 
+                c.dirty = true;
+            }
             send_wallet(fd, c);
             break;
         }
     }
 
     if (ok) {
+        t.dirty = true;
         send_to_room(c.current_farm, make_tile_update(c.current_farm, x, y)); // 성공 시 방 전원에게
     } else {
         send_tile_update(fd, c.current_farm, x, y); // 실패 시 요청자(수행자)에게만
@@ -337,6 +347,7 @@ void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) 
         // 4. 처리
         c.coin -= CROPS[crop].seed_price * count;
         c.seeds[crop] += count;
+        c.dirty = true;
         send_wallet(fd, c);
 
     } else if (type == PKT_SELL) {
@@ -349,6 +360,7 @@ void handle_wallet(int fd, Client& c, uint16_t type, const std::string payload) 
         // 4. 처리
         c.held[crop] -= count;
         c.coin += CROPS[crop].sell_price * count;
+        c.dirty = true;
         send_wallet(fd, c);
     }
 }
@@ -662,7 +674,8 @@ int main() {
                     
                     if (closed) {
                         if (clients.count(fd)) {
-                            uint32_t closing_id = clients[fd].user_id;
+                            Client closing = clients[fd]; // 복사본. erase 돼도 남아있도록
+                            uint32_t closing_id = closing.user_id;
 
                             // 이 사람의 농장에 와 있던 방문자들 각자 자기 농장으로
                             for (auto& [cfd, c]: clients) {
@@ -671,10 +684,19 @@ int main() {
                                 c.x = 0; c.y = 0; // 입장 시 위치 초기화
                                 send_farm_snapshot(cfd, c.user_id);
                             }
-                            clients.erase(fd);
-                            if (farms.count(closing_id)) {
-                                farms.erase(closing_id);
+
+                            if (closing_id != 0 && farms.count(closing_id)) { // 로그인 전 접속은 저장할 게 없음
+                                Farm farm = farms[closing_id]; // 농장 복사본
+                                db_pool -> enqueue([closing, farm] {
+                                    if (!save_user_db(closing.user_id, closing.coin, closing.seeds, closing.held))
+                                        fprintf(stderr, "%u: 유저 정보 저장 실패\n", closing.user_id);
+                                    if (!save_farm_db(closing.user_id, farm))
+                                        fprintf(stderr, "%u: 농장 정보 저장 실패\n", closing.user_id);
+                                });
                             }
+
+                            clients.erase(fd);
+                            farms.erase(closing_id);
                             broadcast_player_list();
                         }
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);

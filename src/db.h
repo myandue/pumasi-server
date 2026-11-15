@@ -29,3 +29,5 @@ bool db_connect();
 uint8_t signup_db(const std::string& nick, const std::string& pw, uint32_t& out_id); // 반환값이 reason이기 때문에 또 다른 반환값인 생성 id는 매개변수로.
 uint8_t login_db(const std::string& nick, const std::string& pw, uint32_t& out_id);
 bool load_user_db(uint32_t user_id, UserData& out);
+bool save_user_db(uint32_t user_id, int coin, const int* seeds, const int* held);
+bool save_farm_db(uint32_t user_id, const Farm& farm);

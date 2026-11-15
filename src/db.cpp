@@ -117,7 +117,7 @@ uint8_t signup_db(const std::string& nick, const std::string& pw, uint32_t& out_
 
     // 인벤토리 3행, 농장 36칸 INSERT
     std::string inv = "INSERT INTO inventory (user_id, crop) VALUES";
-    for (int crop = 1 ; crop <= 3 ; crop++) {
+    for (int crop = 1 ; crop < CROP_COUNT ; crop++) {
         if (crop > 1) inv += ",";
         inv += "(" + std::to_string(id) + ", " + std::to_string(crop) + ")";
     }
@@ -247,6 +247,66 @@ bool load_user_db(uint32_t user_id, UserData& out) {
         // base: 진법. 10이면 10진수.
     }
     mysql_free_result(res);
+
+    return true;
+}
+
+bool save_user_db(uint32_t user_id, int coin, const int* seeds, const int* held) {
+    std::string id = std::to_string(user_id);
+
+    if (mysql_query(db, "START TRANSACTION")) return false;
+    
+    std::string user = "UPDATE users SET coin = " + std::to_string(coin) + " WHERE id = " + id;
+    if (mysql_query(db, user.c_str())) {
+        mysql_query(db, "ROLLBACK");
+        return false;
+    }
+
+    for (int crop = 1 ; crop < CROP_COUNT ; crop++) {
+        std::string inv = "UPDATE inventory SET seeds = " + std::to_string(seeds[crop])
+            + ", held = " + std::to_string(held[crop])
+            + " WHERE user_id = " + id + " AND crop = " + std::to_string(crop);
+        
+        if (mysql_query(db, inv.c_str())) {
+            mysql_query(db, "ROLLBACK");
+            return false;
+        }
+    }
+
+    if (mysql_query(db, "COMMIT")) {
+        mysql_query(db, "ROLLBACK");
+        return false;
+    }
+
+    return true;
+}
+
+bool save_farm_db(uint32_t user_id, const Farm& farm) {
+    std::string id = std::to_string(user_id);
+
+    if (mysql_query(db, "START TRANSACTION")) return false;
+
+    for (int x = 0 ; x < FIELD_SIZE ; x++) {
+        for (int y = 0 ; y < FIELD_SIZE ; y++) {
+            if (farm.tiles[y][x].dirty) {
+                const Tile& t = farm.tiles[y][x];
+                std::string sql = "UPDATE farm_tiles SET state = " + std::to_string(t.state)
+                    + ", crop = " + std::to_string(t.crop) + ", stage = " + std::to_string(t.stage)
+                    + ", watered_at = " + std::to_string(t.watered_at)
+                    + " WHERE user_id = " + id + " AND x = " + std::to_string(x) + " AND y = " + std::to_string(y);
+
+                if (mysql_query(db, sql.c_str())) { 
+                    mysql_query(db, "ROLLBACK");
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (mysql_query(db, "COMMIT")) {
+        mysql_query(db, "ROLLBACK");
+        return false;
+    }
 
     return true;
 }
