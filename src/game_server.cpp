@@ -460,6 +460,60 @@ void handle_login(int fd, std::string payload) {
     });
 }
 
+void save_dirty() {
+    // 계정
+    for (auto& [cfd, c]: clients) {
+        if (c.user_id == 0 || !c.dirty) continue;
+
+        Client copy = c; // 값 복사
+        c.dirty = false; // 값을 워커에 넘기는 순간 dirty 플래그 off
+        int fd = cfd;
+        uint64_t conn_id = c.conn_id;
+
+        db_pool -> enqueue([copy, fd, conn_id] {
+            if (!save_user_db(copy.user_id, copy.coin, copy.seeds, copy.held)) {
+                fprintf(stderr, "%u: 주기 저장(유저) 실패\n", copy.user_id);
+                post_to_conn(fd, conn_id, [](Client& c) { c.dirty = true; }); // 실패시 dirty 태그 다시 on
+            }
+        });
+    }
+
+    // 농장
+    for (auto& [owner, farm]: farms) {
+        bool any = false;
+
+        Farm copy = farm; // 값 복사
+        // farm은 tile을 다 훑어야함
+        for (int x = 0 ; x < FIELD_SIZE ; x++) {
+            for (int y = 0 ; y < FIELD_SIZE ; y++) {
+                if (farm.tiles[y][x].dirty) {
+                    any = true;
+                    farm.tiles[y][x].dirty = false; // 원본은 끔
+                }
+            }
+        }
+        if (!any) continue; // 바뀐 칸 없는 농장은 건너뜀
+        uint32_t id = owner;
+
+        db_pool -> enqueue([copy, id] {
+            if (!save_farm_db(id, copy)) {
+                fprintf(stderr, "%u: 주기 저장(농장) 실패\n", id);
+                post_to_main([copy, id] {
+                    auto it = farms.find(id);
+                    if (it == farms.end()) return; // 주인이 나가서 농장이 지워졌으면 그냥 끝
+
+                    for (int x = 0 ; x < FIELD_SIZE ; x++) {
+                        for (int y = 0 ; y < FIELD_SIZE ; y++) {
+                            // dirty 플래그 on인 tile만 원본 tile의 dirty 플래그 on
+                            if (copy.tiles[y][x].dirty) it -> second.tiles[y][x].dirty = true;
+                        }
+                    }
+                });
+            }
+        });
+    }
+}
+
 void on_tick() {    
     // 초기화는 이 줄에 도달했을 때 딱 한 번
     static uint32_t tick = 0;
@@ -482,6 +536,7 @@ void on_tick() {
         send_to_room(owner, make_packet(PKT_SNAPSHOT, payload));
     }
     
+    if (tick % 600 == 0) save_dirty(); // tick은 50ms, 30s마다 dirty 체크 및 저장.
     tick++;
 }
 
